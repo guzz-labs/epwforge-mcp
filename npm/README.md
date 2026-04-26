@@ -65,7 +65,7 @@ Get your API key at [epwforge.com](https://epwforge.com).
 
 - **Website:** [epwforge.com](https://epwforge.com)
 - **Maker:** [Guzzlabs](https://guzzlabs.com)
-- **Issues:** [github.com/tunaguzzy/epwforge-mcp/issues](https://github.com/tunaguzzy/epwforge-mcp/issues)
+- **Issues:** [github.com/guzz-labs/epwforge-mcp/issues](https://github.com/guzz-labs/epwforge-mcp/issues)
 
 ## License
 

@@ -55,8 +55,8 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://epwforge.com"
-Repository = "https://github.com/tunaguzzy/epwforge-mcp"
-Issues = "https://github.com/tunaguzzy/epwforge-mcp/issues"
+Repository = "https://github.com/guzz-labs/epwforge-mcp"
+Issues = "https://github.com/guzz-labs/epwforge-mcp/issues"
 
 [project.scripts]
 epwforge-mcp = "epwforge_mcp:main"

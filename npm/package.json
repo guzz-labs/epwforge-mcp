@@ -55,11 +55,11 @@
   "homepage": "https://epwforge.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tunaguzzy/epwforge-mcp.git",
+    "url": "git+https://github.com/guzz-labs/epwforge-mcp.git",
     "directory": "npm"
   },
   "bugs": {
-    "url": "https://github.com/tunaguzzy/epwforge-mcp/issues"
+    "url": "https://github.com/guzz-labs/epwforge-mcp/issues"
   },
   "author": {
     "name": "Guzzlabs",

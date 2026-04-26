@@ -1,0 +1,78 @@
+{
+  "name": "epwforge-mcp",
+  "version": "0.0.1",
+  "description": "MCP server for EPWForge — generate, morph, and download EPW weather files for EnergyPlus, OpenStudio, IES VE, and eQUEST. TMYx, AMY, CMIP6 future-climate scenarios, and wildfire smoke overlays for AI agents.",
+  "main": "index.js",
+  "bin": {
+    "epwforge-mcp": "index.js"
+  },
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "cursor",
+    "ai-agent",
+    "ai-tools",
+    "epw",
+    "epw-file",
+    "weather-file",
+    "weather-data",
+    "energyplus",
+    "openstudio",
+    "ies-ve",
+    "equest",
+    "doe2",
+    "tmy",
+    "tmyx",
+    "tmy3",
+    "amy",
+    "weather-morphing",
+    "climate-deltas",
+    "future-weather",
+    "climate-change",
+    "cmip6",
+    "ssp",
+    "era5",
+    "reanalysis",
+    "building-energy-simulation",
+    "building-energy-modeling",
+    "energy-modeling",
+    "bem",
+    "bes",
+    "climate-adaptation",
+    "climate-resilience",
+    "wildfire-smoke",
+    "aod",
+    "epwforge",
+    "guzzlabs"
+  ],
+  "homepage": "https://epwforge.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guzzlabs/epwforge-mcp.git",
+    "directory": "npm"
+  },
+  "bugs": {
+    "url": "https://github.com/guzzlabs/epwforge-mcp/issues"
+  },
+  "author": {
+    "name": "Guzzlabs",
+    "email": "tuna@guzzlabs.com",
+    "url": "https://guzzlabs.com"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ]
+}

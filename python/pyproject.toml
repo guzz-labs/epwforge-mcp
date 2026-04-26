@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "epwforge-mcp"
+version = "0.0.1"
+description = "MCP server for EPWForge — generate, morph, and download EPW weather files for EnergyPlus, OpenStudio, IES VE, and eQUEST. TMYx, AMY, CMIP6 future-climate scenarios, and wildfire smoke overlays for AI agents."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Guzzlabs", email = "tuna@guzzlabs.com" }
+]
+keywords = [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "claude",
+    "ai-agent",
+    "epw",
+    "weather-file",
+    "energyplus",
+    "openstudio",
+    "ies-ve",
+    "equest",
+    "tmy",
+    "tmyx",
+    "amy",
+    "weather-morphing",
+    "climate-deltas",
+    "future-weather",
+    "cmip6",
+    "era5",
+    "building-energy-simulation",
+    "energy-modeling",
+    "climate-adaptation",
+    "wildfire-smoke",
+    "epwforge",
+    "guzzlabs",
+]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://epwforge.com"
+Repository = "https://github.com/guzzlabs/epwforge-mcp"
+Issues = "https://github.com/guzzlabs/epwforge-mcp/issues"
+
+[project.scripts]
+epwforge-mcp = "epwforge_mcp:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/epwforge_mcp"]

@@ -4,13 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "epwforge-mcp"
-version = "0.0.1"
+version = "0.1.0"
 description = "MCP server for EPWForge — generate, morph, and download EPW weather files for EnergyPlus, OpenStudio, IES VE, and eQUEST. TMYx, AMY, CMIP6 future-climate scenarios, and wildfire smoke overlays for AI agents."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [
     { name = "Guzzlabs", email = "tuna@guzzlabs.com" }
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx[http2]>=0.27.0",
+    "pydantic>=2.0",
 ]
 keywords = [
     "mcp",
@@ -40,7 +45,7 @@ keywords = [
     "guzzlabs",
 ]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",

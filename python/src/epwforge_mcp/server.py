@@ -8,10 +8,14 @@ from typing import Annotated, Any, Literal
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
+from . import __version__
 from .client import EPWForgeClient, EPWForgeError, write_epw_base64
 
 
 mcp = FastMCP("epwforge")
+# FastMCP doesn't expose `version` on its constructor; set it on the wrapped
+# low-level Server so MCP clients see the package version, not the SDK version.
+mcp._mcp_server.version = __version__
 
 # One client instance for the whole server lifetime.
 _client: EPWForgeClient | None = None

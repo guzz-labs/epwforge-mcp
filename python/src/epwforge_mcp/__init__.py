@@ -13,10 +13,26 @@ Tools:
 Authentication:
     Set EPWFORGE_API_KEY in your MCP client config.
     Generate an API key at https://epwforge.com/account.
+
+CLI:
+    epwforge-mcp                  — run the stdio MCP server (default)
+    epwforge-mcp install ...      — one-command setup for Claude Desktop /
+                                    Claude Code / Cursor (writes the MCP
+                                    config block for the user)
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
-from .server import main
+
+def main() -> None:
+    """Top-level CLI entry — dispatches between server (default) and `install`."""
+    import sys
+    args = sys.argv[1:]
+    if args and args[0] == "install":
+        from .install import main_entry as install_main
+        sys.exit(install_main(args[1:]))
+    from .server import main as server_main
+    server_main()
+
 
 __all__ = ["main", "__version__"]

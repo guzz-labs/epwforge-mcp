@@ -1,8 +1,10 @@
 # epwforge-mcp
 
+<!-- mcp-name: io.github.guzz-labs/epwforge-mcp -->
+
 > MCP server for [EPWForge](https://epwforge.com) — give Claude, Cursor, and other AI agents the ability to generate, morph, and download weather files for building energy simulation.
 
-**Status:** 0.1.0 (Python). One tool call → one EPW. Production backend, Pro-tier features wired in.
+**Status:** Live on PyPI and the [official MCP Registry](https://registry.modelcontextprotocol.io). One tool call → one EPW. Production backend, Pro-tier features wired in.
 
 ## What is EPWForge?
 

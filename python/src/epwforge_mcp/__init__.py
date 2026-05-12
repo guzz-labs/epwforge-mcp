@@ -21,7 +21,7 @@ CLI:
                                     config block for the user)
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 def main() -> None:

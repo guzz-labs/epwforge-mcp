@@ -306,13 +306,15 @@ async def find_station(
     lon: Annotated[float, Field(ge=-180, le=180)],
     max_results: Annotated[int, Field(ge=1, le=50)] = 10,
 ) -> dict[str, Any]:
-    """Find weather stations near a coordinate.
+    """Find the nearest ERA5 grid cells with weather data available.
 
-    Useful for "what data is available near X" queries. Returns station
-    name, exact coordinates, WMO ID, distance, and (when available)
-    climate zone. EPWForge can generate weather files for ANY lat/lon
-    via TMYx synthesis — this is for users who want the nearest
-    physically-observed station instead.
+    EPWForge synthesizes TMYx for ANY lat/lon — the underlying data is
+    on a 0.25-degree ERA5 grid, not named airport stations. This tool
+    returns the closest grid cells to your query coordinate and their
+    distance in km. Useful for "what's the nearest available data" or
+    to confirm coverage in a remote location.
+
+    Response shape: { count, stations: [{ lat, lon, distance_km }, ...] }.
 
     Example:
       find_station(lat=40.7, lon=-74.0, max_results=5)

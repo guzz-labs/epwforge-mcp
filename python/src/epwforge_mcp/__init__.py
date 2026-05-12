@@ -15,7 +15,7 @@ Authentication:
     Generate an API key at https://epwforge.com/account.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .server import main
 

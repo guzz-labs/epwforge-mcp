@@ -1,7 +1,7 @@
 {
   "name": "epwforge-mcp",
   "version": "0.0.1",
-  "description": "MCP server for EPWForge — generate, morph, and download EPW weather files for EnergyPlus, OpenStudio, IES VE, and eQUEST. TMYx, AMY, CMIP6 future-climate scenarios, and wildfire smoke overlays for AI agents.",
+  "description": "MCP server for EPWForge — let Claude and other AI agents generate climate-stressed weather files (EPW, DDY) for any global location. Custom TMYx / AMY synthesis from ERA5, CMIP6 future-climate morphing (4 SSPs, 7 percentiles, 21-model ensemble), urban heat island presets, extreme-event injection (heat waves, cold snaps, humidity & wind compound events), and wildfire smoke overlays. For EnergyPlus, OpenStudio, IES VE, eQUEST.",
   "main": "index.js",
   "bin": {
     "epwforge-mcp": "index.js"
@@ -47,6 +47,15 @@
     "bes",
     "climate-adaptation",
     "climate-resilience",
+    "ashrae-design-day",
+    "ddy",
+    "custom-weather-file",
+    "extreme-events",
+    "heat-wave",
+    "cold-snap",
+    "compound-events",
+    "urban-heat-island",
+    "uhi",
     "wildfire-smoke",
     "aod",
     "epwforge",

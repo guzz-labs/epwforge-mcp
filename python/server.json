@@ -7,7 +7,7 @@
     "source": "github",
     "subfolder": "python"
   },
-  "version": "0.1.3",
+  "version": "0.2.0",
   "packages": [
     {
       "registryType": "pypi",
@@ -23,6 +23,22 @@
           "format": "string",
           "isSecret": true,
           "name": "EPWFORGE_API_KEY"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://epwforge.com/api/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer token — your EPWForge API key (sk_live_...). Generate one at https://epwforge.com/account.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string",
+          "value": "Bearer {api_key}"
         }
       ]
     }

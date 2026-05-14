@@ -1,15 +1,28 @@
-"""FastMCP server exposing the four EPWForge tools."""
+"""FastMCP server exposing the EPWForge tools."""
 
 from __future__ import annotations
 
+import base64
 import sys
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from . import __version__
-from .client import EPWForgeClient, EPWForgeError, write_epw_base64
+from .client import EPWForgeClient, EPWForgeError, download_text, write_epw_base64
+from .epw_parser import (
+    EPWFile,
+    c_to_f,
+    daily_means_by_date,
+    design_conditions_F,
+    format_md,
+    m_to_ft,
+    monthly_means,
+    parse_epw,
+    percentile,
+)
 
 
 mcp = FastMCP("epwforge")
@@ -324,7 +337,263 @@ async def find_station(
     return data
 
 
+# ── Tool 5 ─────────────────────────────────────────────────────────────
+@mcp.tool()
+async def analyze_epw(
+    url: Annotated[
+        str,
+        Field(
+            description=(
+                "URL to an EPW file. Accepts signed Vercel Blob URLs returned "
+                "by other EPWForge tools, OneBuilding mirror URLs, or any "
+                "publicly fetchable .epw file."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Download an EPW URL and summarize its design conditions, degree-days,
+    solar resource, and monthly temperature shape.
+
+    No new generation — this just fetches the URL, parses the 8760 hourly
+    records, and returns a compact statistical summary in imperial units.
+    Useful when you've just generated an EPW (or have one handy) and want a
+    quick read of "is this file what I expected" without a full simulation.
+
+    Computed fields:
+      - location: city, lat, lon, elevation_ft, timezone (from EPW header)
+      - annual_mean_temp_F
+      - cooling_design_db_F  (1% percentile, ASHRAE-style)
+      - heating_design_db_F  (99% percentile, ASHRAE-style)
+      - peak_cooling_day, peak_heating_day  (MM-DD of hottest/coldest day mean)
+      - hdd_65_annual, cdd_65_annual  (degree-days base 65 °F)
+      - ghi_total_annual_kwh_per_m2
+      - monthly_mean_temp_F  (12-element array, Jan..Dec)
+
+    Example:
+      analyze_epw(url="https://blob.vercel-storage.com/epws/abc...epw?...")
+    """
+    # _get_client() validates EPWFORGE_API_KEY is set even though the
+    # download itself is unauthenticated — this keeps the tool gated to
+    # users who have signed up, mirroring the rest of the surface.
+    _get_client()
+
+    text = await download_text(url)
+    epw = parse_epw(text)
+    return _summarize_epw(epw, source_url=url)
+
+
+# ── Tool 6 ─────────────────────────────────────────────────────────────
+@mcp.tool()
+async def compare_scenarios(
+    configs: Annotated[
+        list[dict[str, Any]],
+        Field(
+            min_length=1,
+            max_length=10,
+            description=(
+                "List of scenario configs (max 10). Each dict accepts the same "
+                "keys as generate_weather_file: lat, lon, basis, amy_year, ssp, "
+                "year, percentile, uhi, events, event_duration, intensity, "
+                "intensity_auto, smoke, smoke_intensity, smoke_duration. lat "
+                "and lon are required on every config."
+            ),
+        ),
+    ],
+    baseline_url: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional EPW URL to use as the baseline (any public or signed "
+                "URL — same shape as analyze_epw). When omitted, a fresh TMYx "
+                "is generated for the first config's lat/lon and used as the "
+                "baseline (counts as one extra scenario credit)."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Sensitivity sweep — generate up to 10 scenarios and return only the
+    headline design-condition deltas vs a baseline. No full EPW content in
+    the response, so even a 10-scenario sweep stays under ~2 KB of context.
+
+    For each config: generates the EPW server-side (calls /api/epwforge),
+    parses the 8760 hourly distribution, computes 1% cooling DB / 99%
+    heating DB / 1% dewpoint, and reports the value plus delta vs baseline.
+
+    Returns:
+      {
+        baseline: { source: <url|"generated">, location: {...},
+                    cooling_db_F, heating_db_F, dewpoint_F },
+        scenarios: [
+          { config: <original input dict>,
+            cooling_db_F, cooling_db_delta_F,
+            heating_db_F, heating_db_delta_F,
+            dewpoint_F,   dewpoint_delta_F },
+          ...
+        ],
+        meta: { tool, version, timestamp, n_scenarios, credits_consumed }
+      }
+
+    Example:
+      compare_scenarios(configs=[
+        {"lat": 40.7, "lon": -74.0, "ssp": "ssp245", "year": 2050},
+        {"lat": 40.7, "lon": -74.0, "ssp": "ssp585", "year": 2090, "percentile": 90},
+        {"lat": 40.7, "lon": -74.0, "ssp": "ssp585", "year": 2090,
+         "percentile": 90, "uhi": "urban", "events": "heatwave"},
+      ])
+    """
+    client = _get_client()
+
+    # ── Baseline ──
+    credits = 0
+    if baseline_url:
+        baseline_text = await download_text(baseline_url)
+        baseline_epw = parse_epw(baseline_text)
+        baseline_source = baseline_url
+    else:
+        if not configs:
+            raise ValueError("compare_scenarios requires at least one config")
+        first = configs[0]
+        if "lat" not in first or "lon" not in first:
+            raise ValueError("first config must include lat and lon when baseline_url is omitted")
+        baseline_data = await client.get_json(
+            "/api/epwforge",
+            {"lat": first["lat"], "lon": first["lon"], "format": "json"},
+        )
+        baseline_text = _decode_epw_b64(baseline_data, "epw_base64")
+        baseline_epw = parse_epw(baseline_text)
+        baseline_source = "generated_tmyx"
+        credits += 1
+
+    baseline_dc = design_conditions_F(baseline_epw)
+
+    # ── Scenarios ──
+    scenarios_out: list[dict[str, Any]] = []
+    for cfg in configs:
+        if "lat" not in cfg or "lon" not in cfg:
+            raise ValueError("every config must include lat and lon")
+        params = _build_epwforge_params(cfg)
+        data = await client.get_json("/api/epwforge", params)
+        text = _decode_epw_b64(data, "epw_base64")
+        epw = parse_epw(text)
+        dc = design_conditions_F(epw)
+        credits += 1
+        scenarios_out.append({
+            "config": cfg,
+            "cooling_db_F": dc["cooling_db_F"],
+            "cooling_db_delta_F": round(dc["cooling_db_F"] - baseline_dc["cooling_db_F"], 1),
+            "heating_db_F": dc["heating_db_F"],
+            "heating_db_delta_F": round(dc["heating_db_F"] - baseline_dc["heating_db_F"], 1),
+            "dewpoint_F": dc["dewpoint_F"],
+            "dewpoint_delta_F": round(dc["dewpoint_F"] - baseline_dc["dewpoint_F"], 1),
+        })
+
+    return {
+        "baseline": {
+            "source": baseline_source,
+            "location": _location_imperial(baseline_epw),
+            **baseline_dc,
+        },
+        "scenarios": scenarios_out,
+        "meta": _meta("compare_scenarios", n_scenarios=len(configs), credits_consumed=credits),
+    }
+
+
 # ── Helpers ────────────────────────────────────────────────────────────
+def _meta(tool: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "tool": tool,
+        "version": __version__,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **extra,
+    }
+
+
+def _location_imperial(epw: EPWFile) -> dict[str, Any]:
+    loc = epw.location
+    return {
+        "city": loc.city,
+        "state": loc.state,
+        "country": loc.country,
+        "lat": loc.latitude,
+        "lon": loc.longitude,
+        "elevation_ft": round(m_to_ft(loc.elevation_m), 0),
+        "timezone": loc.timezone,
+    }
+
+
+def _summarize_epw(epw: EPWFile, *, source_url: str) -> dict[str, Any]:
+    h = epw.hourly
+    db_c = h.dry_bulb_c
+    db_f = [c_to_f(c) for c in db_c]
+
+    # Daily mean DB in °F for peak-day + degree-day calcs.
+    daily_mean_f = daily_means_by_date(db_f, h.month, h.day)
+    peak_cooling_key = max(daily_mean_f, key=daily_mean_f.get)
+    peak_heating_key = min(daily_mean_f, key=daily_mean_f.get)
+
+    hdd_65 = sum(max(0.0, 65.0 - dm) for dm in daily_mean_f.values())
+    cdd_65 = sum(max(0.0, dm - 65.0) for dm in daily_mean_f.values())
+
+    # GHI in kWh/m² (sum hourly Wh/m² → divide by 1000).
+    ghi_total_kwh = sum(h.ghi_wh_m2) / 1000.0
+
+    monthly_f = monthly_means(db_f, h.month)
+
+    return {
+        "source_url": source_url,
+        "location": _location_imperial(epw),
+        "annual_mean_temp_F": round(sum(db_f) / len(db_f), 1),
+        "cooling_design_db_F": round(c_to_f(percentile(db_c, 99.0)), 1),
+        "heating_design_db_F": round(c_to_f(percentile(db_c, 1.0)), 1),
+        "peak_cooling_day": format_md(*peak_cooling_key),
+        "peak_heating_day": format_md(*peak_heating_key),
+        "hdd_65_annual": round(hdd_65, 0),
+        "cdd_65_annual": round(cdd_65, 0),
+        "ghi_total_annual_kwh_per_m2": round(ghi_total_kwh, 0),
+        "monthly_mean_temp_F": [round(v, 1) for v in monthly_f],
+        "n_hours": len(db_c),
+        "meta": _meta("analyze_epw"),
+    }
+
+
+def _build_epwforge_params(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Translate a compare_scenarios config dict into /api/epwforge params.
+
+    Mirrors generate_weather_file's param shape. format=json is forced so
+    we get back epw_base64 (we need the raw EPW to compute design conds).
+    """
+    params: dict[str, Any] = {
+        "lat": cfg["lat"],
+        "lon": cfg["lon"],
+        "basis": cfg.get("basis", "tmy"),
+        "amy_year": cfg.get("amy_year"),
+        "ssp": cfg.get("ssp"),
+        "year": cfg.get("year"),
+        "percentile": cfg.get("percentile", 50),
+        "uhi": cfg.get("uhi", "none"),
+        "events": cfg.get("events"),
+        "event_duration": cfg.get("event_duration", 14),
+        "intensity": cfg.get("intensity"),
+        "intensity_auto": str(cfg.get("intensity_auto", True)).lower(),
+        "smoke": str(cfg.get("smoke", False)).lower() if cfg.get("smoke") else None,
+        "smoke_intensity": cfg.get("smoke_intensity"),
+        "smoke_duration": cfg.get("smoke_duration"),
+        "format": "json",
+    }
+    return params
+
+
+def _decode_epw_b64(data: dict[str, Any], key: str) -> str:
+    """Extract base64 EPW from an /api/epwforge JSON response and return text."""
+    b64 = data.get(key)
+    if not b64:
+        raise EPWForgeError(
+            502,
+            f"EPWForge response missing {key} — cannot compute design conditions",
+        )
+    return base64.b64decode(b64).decode("utf-8", errors="replace")
+
+
 def _handle_file_response(
     data: dict[str, Any],
     b64_key: str,

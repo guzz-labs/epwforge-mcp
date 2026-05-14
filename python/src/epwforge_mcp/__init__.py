@@ -9,6 +9,8 @@ Tools:
     generate_design_day    — DDY file with the same options
     generate_ensemble      — Per-model CMIP6 ensemble of morphed EPWs
     find_station           — Search available weather stations near a location
+    analyze_epw            — Download an EPW URL and summarize design conditions, DD, GHI
+    compare_scenarios      — Sensitivity sweep over multiple configs, returns only deltas
 
 Authentication:
     Set EPWFORGE_API_KEY in your MCP client config.
@@ -21,7 +23,7 @@ CLI:
                                     config block for the user)
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 
 def main() -> None:

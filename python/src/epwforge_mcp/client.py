@@ -92,3 +92,27 @@ def write_epw_base64(b64: str, save_to: str | Path) -> int:
     data = base64.b64decode(b64)
     path.write_bytes(data)
     return len(data)
+
+
+async def download_text(url: str, *, timeout: float = 60.0) -> str:
+    """Fetch any URL as text — used to download EPW files from signed URLs.
+
+    No EPWForge auth headers are sent (the URL may be a Vercel Blob signed
+    URL, a OneBuilding mirror, a GitHub raw URL, etc.). Caller is
+    responsible for whatever auth the URL itself carries.
+
+    Raises EPWForgeError on non-2xx response.
+    """
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        headers={"User-Agent": "epwforge-mcp"},
+        follow_redirects=True,
+    ) as c:
+        resp = await c.get(url)
+        if resp.status_code >= 400:
+            snippet = resp.text[:200].replace("\n", " ")
+            raise EPWForgeError(
+                resp.status_code,
+                f"Failed to fetch {url} (HTTP {resp.status_code}): {snippet}",
+            )
+        return resp.text

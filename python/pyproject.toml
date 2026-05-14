@@ -78,5 +78,10 @@ Issues = "https://github.com/guzz-labs/epwforge-mcp/issues"
 [project.scripts]
 epwforge-mcp = "epwforge_mcp:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/epwforge_mcp"]

@@ -22,6 +22,7 @@ import http.server
 import json
 import os
 import socketserver
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -43,7 +44,7 @@ async def main() -> None:
     from epwforge_mcp.client import EPWForgeClient
     from epwforge_mcp.server import analyze_epw, compare_scenarios
 
-    tmp = Path("/tmp/epwforge_smoke")
+    tmp = Path(tempfile.gettempdir()) / "epwforge_smoke"
     tmp.mkdir(parents=True, exist_ok=True)
     epw_path = tmp / "nyc_tmyx.epw"
 

@@ -2,7 +2,7 @@
 
 > MCP server for [EPWForge](https://epwforge.com) — give Claude, Cursor, and other AI agents the ability to generate, morph, and download weather files for building energy simulation.
 
-**Status:** 0.1.4 (Python). Six tools — generation + analysis + sensitivity sweep. Production backend, Pro-tier features wired in.
+**Status:** 0.1.5 (Python). Nine tools — generation + station fetch + analysis + sensitivity sweep + SVG charts. Production backend, Pro-tier features wired in.
 
 ## What is EPWForge?
 
@@ -18,18 +18,31 @@ EPWForge generates and morphs weather files (`.epw`, `.ddy`) for building energy
 
 ## Tools
 
-Six MCP tools — four EPWForge API endpoints plus two analysis utilities that work on the EPWs you've already generated:
+Nine MCP tools — generation, station discovery + fetch, analysis, sensitivity sweep, and inline SVG charts:
 
 | Tool | Purpose |
 |---|---|
-| `generate_weather_file` | The workhorse. One call returns an EPW with any combination of TMY/AMY/SSP basis, UHI, extreme events, and smoke. |
+| `generate_weather_file` | **Synthesize** an EPW from ERA5 reanalysis at any global lat/lon. Combine basis + SSP + UHI + extreme events + smoke in one call. Default vintage **2011-2025** (recent 15 yr); pick another via `tmy_period`. |
 | `generate_design_day` | DDY file for EnergyPlus design-day sizing, computed from the same enriched hourly data. |
 | `generate_ensemble` | Per-model CMIP6 ensemble — one morphed EPW per climate model (Pro plan). |
-| `find_station` | Search weather stations near a coordinate (returns name, WMO ID, distance). |
-| `analyze_epw` | Download an EPW URL and summarize design conditions, degree-days, GHI, and monthly temperature shape. No new generation. |
-| `compare_scenarios` | Sensitivity sweep — run up to 10 scenarios and return only headline design-condition deltas vs a baseline (no full EPW content in the response). |
+| `find_station` | Search the GuzzStations / OneBuilding library for the nearest published TMYx stations. Returns each station's `files[]` URLs plus `agent_guidance` so the LLM asks the user "published station or synthesize?" before generating. |
+| `get_station_epw` | **Fetch** a published OneBuilding/GuzzStation TMYx file by URL (URL comes from `find_station`). Returns the .epw (and .ddy when available). |
+| `analyze_epw` | Download an EPW URL and summarize design conditions, degree-days, GHI, monthly temperature shape. No new generation. |
+| `compare_scenarios` | Sensitivity sweep — up to 10 scenarios in parallel, returns only design-condition deltas vs baseline (no full EPW content). |
+| `chart_diurnal_profile` | Inline SVG: monthly Max/Avg/Min hourly profile in °F. Highlights January + July with annual mean overlaid. |
+| `chart_compare_scenarios` | Inline SVG: horizontal bar chart of cooling/heating/dewpoint deltas. Consumes `compare_scenarios`'s response shape directly. |
 
-Most users will only ever need `generate_weather_file`. Compose options into one call instead of chaining tools — and reach for `analyze_epw` / `compare_scenarios` when you want a quick read or a tight sensitivity table.
+Most agents will use `find_station` to discover what's available, then either `get_station_epw` (for a published TMY) or `generate_weather_file` (for a custom synthesized one). Reach for `analyze_epw` / `compare_scenarios` for quick reads, and `chart_*` to visualize.
+
+### Synthesized vs published — what's the difference?
+
+| | `generate_weather_file` | `get_station_epw` |
+|---|---|---|
+| Source | ERA5 reanalysis at the exact lat/lon | Published TMYx for a named airport / WMO station |
+| Speed | ~10s per call | ~1s (cached on the GuzzStations VPS mirror) |
+| Customization | Full SSP / UHI / events / smoke / vintage stack | None — file is what it is |
+| When to use | Custom site, microclimate concerns, future climate, what-if scenarios | Compliance / submittals, reproducibility, comparison to industry baseline |
+| Vintage default | 2011-2025 (configurable via `tmy_period`) | Whatever the published file is — usually TMYx 2007-2021 |
 
 ## Quick example
 
@@ -88,8 +101,9 @@ Generate an API key at [epwforge.com/account](https://epwforge.com/account).
 | SSP future-climate morphing | Pro |
 | `generate_ensemble` (per-model CMIP6) | Pro |
 | `analyze_epw` (parse-only, no generation) | Free (key required) |
-| `compare_scenarios` | Inherits — each scenario in the sweep counts as one generation under your tier |
-| `find_station` | Free |
+| `compare_scenarios` | Inherits — each scenario counts as one generation under your tier |
+| `find_station` / `get_station_epw` | Free (key required) — pre-computed files, no synthesis cost |
+| `chart_diurnal_profile` / `chart_compare_scenarios` | Free (key required) — pure parse + render |
 
 Tier enforcement happens at the API; the MCP surfaces 403s as `"Plan upgrade required — upgrade at https://epwforge.com/pricing"`.
 

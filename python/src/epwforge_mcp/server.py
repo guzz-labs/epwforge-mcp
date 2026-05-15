@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import sys
+import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from . import __version__
+from .charts import compare_scenarios_svg, diurnal_profile_svg
 from .client import EPWForgeClient, EPWForgeError, download_text, write_epw_base64
 from .epw_parser import (
     EPWFile,
@@ -24,6 +28,12 @@ from .epw_parser import (
     parse_epw,
     percentile,
 )
+
+
+# ── TMY vintage choices (must match lib/tmy-period.ts on the platform side) ──
+TMY_PERIOD_CHOICES = ("full", "2011-2025", "2009-2023", "2007-2021", "2004-2018")
+DEFAULT_TMY_PERIOD = "2011-2025"
+TmyPeriod = Literal["full", "2011-2025", "2009-2023", "2007-2021", "2004-2018"]
 
 
 mcp = FastMCP("epwforge")
@@ -122,6 +132,18 @@ async def generate_weather_file(
         int | None,
         Field(ge=3, le=30, description="Smoke event length in days."),
     ] = None,
+    tmy_period: Annotated[
+        TmyPeriod,
+        Field(
+            description=(
+                "TMYx vintage for the synthesized basis (ignored when basis='amy'). "
+                "Mirrors the EPWExplorer UI's dropdown. Default '2011-2025' (recent "
+                "15-year window — captures post-2010 warming). Use '2007-2021' to "
+                "match the published OneBuilding TMYx 2007-2021 vintage for direct "
+                "comparison; 'full' (1950-2025) for the long-baseline view."
+            )
+        ),
+    ] = DEFAULT_TMY_PERIOD,
     save_to: Annotated[
         str | None,
         Field(
@@ -178,10 +200,13 @@ async def generate_weather_file(
         "smoke": str(smoke).lower() if smoke else None,
         "smoke_intensity": smoke_intensity,
         "smoke_duration": smoke_duration,
+        "tmy_period": tmy_period,
         "format": "json",
     }
     data = await client.get_json("/api/epwforge", params)
-    return _handle_file_response(data, "epw_base64", save_to)
+    out = _handle_file_response(data, "epw_base64", save_to)
+    out["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
+    return out
 
 
 # ── Tool 2 ─────────────────────────────────────────────────────────────
@@ -202,6 +227,7 @@ async def generate_design_day(
     smoke: bool = False,
     smoke_intensity: Annotated[int | None, Field(ge=1, le=10)] = None,
     smoke_duration: Annotated[int | None, Field(ge=3, le=30)] = None,
+    tmy_period: TmyPeriod = DEFAULT_TMY_PERIOD,
     save_to: str | None = None,
 ) -> dict[str, Any]:
     """Generate an ASHRAE design day (DDY) file for EnergyPlus.
@@ -230,10 +256,13 @@ async def generate_design_day(
         "smoke": str(smoke).lower() if smoke else None,
         "smoke_intensity": smoke_intensity,
         "smoke_duration": smoke_duration,
+        "tmy_period": tmy_period,
         "format": "json",
     }
     data = await client.get_json("/api/design-day", params)
-    return _handle_file_response(data, "ddy_base64", save_to)
+    out = _handle_file_response(data, "ddy_base64", save_to)
+    out["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
+    return out
 
 
 # ── Tool 3 ─────────────────────────────────────────────────────────────
@@ -254,6 +283,7 @@ async def generate_ensemble(
     smoke: bool = False,
     smoke_intensity: Annotated[int | None, Field(ge=1, le=10)] = None,
     smoke_duration: Annotated[int | None, Field(ge=3, le=30)] = None,
+    tmy_period: TmyPeriod = DEFAULT_TMY_PERIOD,
     save_to_dir: Annotated[
         str | None,
         Field(
@@ -296,8 +326,10 @@ async def generate_ensemble(
         "smoke": str(smoke).lower() if smoke else None,
         "smoke_intensity": smoke_intensity,
         "smoke_duration": smoke_duration,
+        "tmy_period": tmy_period,
     }
     data = await client.get_json("/api/ensemble-epw", params)
+    data["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
 
     if save_to_dir:
         from pathlib import Path
@@ -315,6 +347,7 @@ async def generate_ensemble(
             "n_models": data.get("n_models"),
             "directory": str(dir_path),
             "members": saved,
+            "weather_basis": data["weather_basis"],
         }
     return data
 
@@ -347,7 +380,180 @@ async def find_station(
     """
     client = _get_client()
     data = await client.get_json("/api/stations", {"lat": lat, "lon": lon, "limit": max_results})
+
+    nearest_km = None
+    stations = data.get("stations", [])
+    if stations:
+        try:
+            nearest_km = min(s.get("distance_km") for s in stations if s.get("distance_km") is not None)
+        except ValueError:
+            nearest_km = None
+
+    if nearest_km is None:
+        nudge = "No OneBuilding stations were returned for this query. Synthesize a custom TMYx via generate_weather_file."
+    elif nearest_km <= 25:
+        nudge = (
+            f"Nearest station is {nearest_km:.0f} km away — almost certainly representative. "
+            "Recommend the user pick one of these published TMYx files unless they have a specific "
+            "microclimate concern (urban core / mountain / coastal)."
+        )
+    elif nearest_km <= 100:
+        nudge = (
+            f"Nearest station is {nearest_km:.0f} km — climate may differ. Show the user both options "
+            "and let them pick: a published station file (industry-standard, instant) or a custom "
+            "TMYx synthesized at exactly the requested coordinate (slower, ~10s, uses ERA5 grid cell)."
+        )
+    else:
+        nudge = (
+            f"Nearest station is {nearest_km:.0f} km away — likely a different climate. "
+            "Recommend synthesizing a custom TMYx via generate_weather_file unless the user "
+            "specifically wants the named station for compliance or reproducibility."
+        )
+
+    data["agent_guidance"] = (
+        "Before generating weather for the user, present these stations and ask which they want — "
+        "a published OneBuilding/GuzzStation TMYx file (named airport, industry-reference, instant) "
+        "or a custom TMYx synthesized from ERA5 reanalysis at the exact lat/lon (slower but locally "
+        "tuned). " + nudge + " Each station has a 'files' array with URLs (multiple TMYx vintages "
+        "per station — e.g., 2007-2021, IWEC2, TMY3). Pass the chosen URL to get_station_epw(url)."
+    )
+    data["next_actions"] = {
+        "use_a_station": "get_station_epw(url='<one of the urls in stations[].files[].url>')",
+        "synthesize_custom": (
+            f"generate_weather_file(lat={lat}, lon={lon}, tmy_period=...) — defaults to "
+            f"'{DEFAULT_TMY_PERIOD}' but accepts any of {list(TMY_PERIOD_CHOICES)}"
+        ),
+    }
+    data["synthesis_options"] = {
+        "tool": "generate_weather_file",
+        "tmy_period_choices": list(TMY_PERIOD_CHOICES),
+        "default": DEFAULT_TMY_PERIOD,
+        "note": (
+            "All vintages synthesize from ERA5 reanalysis via GuzzWeather (Finkelstein-Schafer). "
+            "Default 2011-2025 captures post-2010 warming. Use 2007-2021 to match the published "
+            "OneBuilding TMYx 2007-2021 standard for direct comparison."
+        ),
+    }
     return data
+
+
+# ── Tool 4b: get_station_epw ──────────────────────────────────────────
+@mcp.tool()
+async def get_station_epw(
+    url: Annotated[
+        str,
+        Field(
+            description=(
+                "OneBuilding TMYx URL — must point at climate.onebuilding.org. "
+                "Get one from `find_station(lat, lon)`'s response: each station has a "
+                "`files` array with one or more URLs (different TMYx vintages, e.g., "
+                "2007-2021, IWEC2, TMY3)."
+            )
+        ),
+    ],
+    save_to: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Local path to write the extracted .epw to (e.g., '/tmp/jfk_tmyx.epw'). "
+                "When set, returns the path + bytes written instead of inline base64."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Download a published OneBuilding/GuzzStation TMYx file by URL.
+
+    This is the *pre-computed station* path: it fetches the published TMYx
+    file for a named airport / WMO station from the GuzzStations library
+    (EPWForge's cached mirror of climate.onebuilding.org). Distinct from
+    `generate_weather_file`, which synthesizes a fresh TMYx from ERA5
+    reanalysis at an arbitrary lat/lon.
+
+    Use this when the user wants:
+      - the industry-standard published file (e.g., for compliance / submittal)
+      - reproducibility against a published TMYx other modelers have used
+      - the closest match for a major airport with high-quality ground obs
+
+    Use `generate_weather_file` instead when:
+      - the user is far from any station (mountain site, remote ocean cell)
+      - the user wants SSP morphing, UHI, extreme events, or smoke layered on
+      - the user has a specific microclimate concern (urban core, coastal)
+
+    Workflow: `find_station(lat, lon)` → pick a station + a file → pass
+    that file's `url` to this tool.
+
+    OneBuilding ships these as zip archives containing .epw + .ddy + .stat;
+    this tool downloads, extracts the .epw, and returns it (saving the
+    optional .ddy as a sibling file when save_to is provided).
+    """
+    client = _get_client()
+    zip_bytes = await client.get_bytes("/api/fetch-epw", {"url": url})
+
+    # Extract the .epw file from the zip blob.
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        raise EPWForgeError(502, f"Response from /api/fetch-epw is not a valid zip ({len(zip_bytes)} bytes)")
+
+    epw_name: str | None = None
+    ddy_name: str | None = None
+    for n in zf.namelist():
+        if n.lower().endswith(".epw"):
+            epw_name = n
+        elif n.lower().endswith(".ddy"):
+            ddy_name = n
+    if not epw_name:
+        raise EPWForgeError(502, f"OneBuilding zip did not contain an .epw file (members: {zf.namelist()})")
+
+    epw_data = zf.read(epw_name)
+    ddy_data = zf.read(ddy_name) if ddy_name else None
+
+    # Pull the LOCATION header to give the agent a one-line "what did I get" summary.
+    location_line = ""
+    try:
+        first = epw_data.decode("utf-8", errors="replace").splitlines()[0]
+        if first.upper().startswith("LOCATION"):
+            location_line = first
+    except Exception:
+        pass
+
+    basis_block = {
+        "type": "published_onebuilding_tmy",
+        "source": "Climate.OneBuilding.Org (via GuzzStations cached mirror)",
+        "vintage": _infer_vintage_from_url(url),
+        "note": (
+            "Pre-computed published TMYx file — industry-standard reference. For a custom TMYx "
+            "synthesized at an exact lat/lon (no named station), use generate_weather_file."
+        ),
+    }
+
+    if save_to:
+        epw_path = Path(save_to).expanduser().resolve()
+        epw_path.parent.mkdir(parents=True, exist_ok=True)
+        epw_path.write_bytes(epw_data)
+        result: dict[str, Any] = {
+            "saved_to": str(epw_path),
+            "bytes_written": len(epw_data),
+            "filename": Path(epw_name).name,
+            "source_url": url,
+            "location_header": location_line,
+            "weather_basis": basis_block,
+        }
+        if ddy_data is not None:
+            ddy_path = epw_path.with_suffix(".ddy")
+            ddy_path.write_bytes(ddy_data)
+            result["ddy_saved_to"] = str(ddy_path)
+            result["ddy_bytes_written"] = len(ddy_data)
+        return result
+
+    return {
+        "filename": Path(epw_name).name,
+        "epw_base64": base64.b64encode(epw_data).decode("ascii"),
+        "ddy_base64": base64.b64encode(ddy_data).decode("ascii") if ddy_data else None,
+        "source_url": url,
+        "location_header": location_line,
+        "weather_basis": basis_block,
+    }
 
 
 # ── Tool 5 ─────────────────────────────────────────────────────────────
@@ -516,6 +722,120 @@ async def compare_scenarios(
     }
 
 
+# ── Tool 7: chart_diurnal_profile ─────────────────────────────────────
+@mcp.tool()
+async def chart_diurnal_profile(
+    url: Annotated[
+        str,
+        Field(
+            description=(
+                "URL to an EPW file. Same shape as analyze_epw — accepts a OneBuilding "
+                "URL, a generated EPWForge URL, or any public .epw URL."
+            )
+        ),
+    ],
+    save_to: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Local path to write the SVG to (e.g., '/tmp/diurnal.svg'). "
+                "When set, returns the path instead of inline SVG. Recommended "
+                "if the SVG is large (>50 KB) to keep agent context lean."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Render a monthly Max / Avg / Min hourly temperature profile as inline SVG.
+
+    Downloads the EPW, computes per-month per-hour Max / Avg / Min dry-bulb
+    in °F, and renders an overlay chart with January (cool reference) and
+    July (warm reference) highlighted, the other 10 months in faint grey,
+    and the annual mean in EPWForge orange.
+
+    Useful right after `analyze_epw` to give the user a visual read on the
+    weather file's annual shape.
+    """
+    _get_client()  # require key
+    text = await download_text(url)
+    epw = parse_epw(text)
+    svg = diurnal_profile_svg(epw)
+
+    if save_to:
+        path = Path(save_to).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(svg, encoding="utf-8")
+        return {
+            "saved_to": str(path),
+            "bytes_written": len(svg.encode("utf-8")),
+            "format": "svg",
+            "source_url": url,
+            "meta": _meta("chart_diurnal_profile"),
+        }
+    return {
+        "svg": svg,
+        "format": "svg",
+        "source_url": url,
+        "meta": _meta("chart_diurnal_profile"),
+    }
+
+
+# ── Tool 8: chart_compare_scenarios ───────────────────────────────────
+@mcp.tool()
+async def chart_compare_scenarios(
+    baseline: Annotated[
+        dict[str, Any],
+        Field(
+            description=(
+                "Baseline dict from compare_scenarios's response — must contain "
+                "cooling_db_F, heating_db_F, dewpoint_F."
+            )
+        ),
+    ],
+    scenarios: Annotated[
+        list[dict[str, Any]],
+        Field(
+            min_length=1,
+            description=(
+                "Scenarios list from compare_scenarios's response. Each item must "
+                "have cooling_db_delta_F, heating_db_delta_F, dewpoint_delta_F, "
+                "and a `config` dict for the row label."
+            ),
+        ),
+    ],
+    save_to: Annotated[
+        str | None,
+        Field(description="Local path to write the SVG to. When set, returns path instead of inline SVG."),
+    ] = None,
+) -> dict[str, Any]:
+    """Render a horizontal-bar chart of compare_scenarios's delta table.
+
+    Designed to consume `compare_scenarios`'s response shape directly:
+    pass `result["baseline"]` and `result["scenarios"]` straight in. Each
+    scenario gets a row of three bars (cooling / heating / dewpoint deltas)
+    centered on a zero line — instantly readable spread.
+    """
+    _get_client()  # require key
+    svg = compare_scenarios_svg(baseline, scenarios)
+
+    if save_to:
+        path = Path(save_to).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(svg, encoding="utf-8")
+        return {
+            "saved_to": str(path),
+            "bytes_written": len(svg.encode("utf-8")),
+            "format": "svg",
+            "n_scenarios": len(scenarios),
+            "meta": _meta("chart_compare_scenarios"),
+        }
+    return {
+        "svg": svg,
+        "format": "svg",
+        "n_scenarios": len(scenarios),
+        "meta": _meta("chart_compare_scenarios"),
+    }
+
+
 # ── Helpers ────────────────────────────────────────────────────────────
 def _meta(tool: str, **extra: Any) -> dict[str, Any]:
     return {
@@ -596,9 +916,53 @@ def _build_epwforge_params(cfg: dict[str, Any]) -> dict[str, Any]:
         "smoke": str(cfg.get("smoke", False)).lower() if cfg.get("smoke") else None,
         "smoke_intensity": cfg.get("smoke_intensity"),
         "smoke_duration": cfg.get("smoke_duration"),
+        "tmy_period": cfg.get("tmy_period", DEFAULT_TMY_PERIOD),
         "format": "json",
     }
     return params
+
+
+def _weather_basis_synthesized(basis: str, amy_year: int | None, tmy_period: str) -> dict[str, Any]:
+    """Build the `weather_basis` block for synthesized-weather tool responses.
+
+    The block exists to give the agent enough structured context to volunteer
+    "I generated this using vintage X" to the user without it having to chase
+    metadata buried in EPW headers.
+    """
+    if basis == "amy":
+        return {
+            "type": "synthesized_amy",
+            "vintage": f"AMY {amy_year}" if amy_year else "AMY (current year)",
+            "source": "ECMWF ERA5 reanalysis (single year)",
+            "note": (
+                "Actual Meteorological Year — historical hourly weather, useful for "
+                "hindcasting and calibration. Not a typical year. For typical-year "
+                "use, leave basis=tmy."
+            ),
+        }
+    return {
+        "type": "synthesized_tmyx",
+        "vintage": tmy_period,
+        "source": "ECMWF ERA5 reanalysis via GuzzWeather (Finkelstein-Schafer)",
+        "note": (
+            f"Synthesized custom TMYx for the {tmy_period} window. For the published "
+            "OneBuilding TMYx of a named station (industry-standard for compliance / "
+            "comparison), use find_station + get_station_epw."
+        ),
+    }
+
+
+def _infer_vintage_from_url(url: str) -> str:
+    """Best-effort extract the vintage label from a OneBuilding URL.
+
+    OneBuilding filenames include the source label (e.g., 'TMYx.2007-2021',
+    'IWEC2', 'TMY3'). We grep for these patterns and fall back to 'unknown'.
+    """
+    name = url.rsplit("/", 1)[-1].lower()
+    for tag in ("tmyx.2007-2021", "tmyx.2009-2023", "tmyx.2011-2025", "iwec2", "tmy3", "tmyx"):
+        if tag in name:
+            return tag.upper().replace(".", " ")
+    return "unknown"
 
 
 def _decode_epw_b64(data: dict[str, Any], key: str) -> str:

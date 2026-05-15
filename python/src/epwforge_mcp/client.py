@@ -54,6 +54,35 @@ class EPWForgeClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def get_bytes(self, path: str, params: dict[str, Any]) -> bytes:
+        """Same auth + error semantics as get_json, but returns raw response bytes.
+
+        Used for endpoints that return binary content (e.g., /api/fetch-epw
+        returns a zip blob containing the EPW + DDY + STAT files).
+        """
+        clean = {k: v for k, v in params.items() if v is not None and v != ""}
+        resp = await self._client.get(path, params=clean)
+        if resp.status_code == 429:
+            retry = resp.headers.get("Retry-After")
+            raise EPWForgeError(
+                429,
+                "Rate limit exceeded. Try again later.",
+                retry_after=int(retry) if retry and retry.isdigit() else None,
+            )
+        if resp.status_code == 403:
+            try:
+                msg = resp.json().get("error", "Plan upgrade required")
+            except Exception:
+                msg = "Plan upgrade required"
+            raise EPWForgeError(403, f"{msg} — upgrade at https://epwforge.com/pricing")
+        if resp.status_code >= 400:
+            try:
+                msg = resp.json().get("error", resp.text[:200])
+            except Exception:
+                msg = resp.text[:200]
+            raise EPWForgeError(resp.status_code, msg)
+        return resp.content
+
     async def get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         clean = {k: v for k, v in params.items() if v is not None and v != ""}
         resp = await self._client.get(path, params=clean)

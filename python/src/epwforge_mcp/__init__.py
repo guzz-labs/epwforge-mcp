@@ -8,6 +8,7 @@ Tools:
     generate_weather_file       — Synthesize EPW from ERA5 (TMY/AMY/SSP + UHI + events + smoke)
     generate_design_day         — DDY file with the same options
     generate_ensemble           — Per-model CMIP6 ensemble of morphed EPWs
+    generate_batch              — Generate up to 10 EPWs in parallel into a save_to_dir
     get_station_epw             — Download a published OneBuilding/GuzzStation TMY file
     find_station                — Search OneBuilding/GuzzStation library near a location
     analyze_epw                 — Download an EPW URL and summarize design conditions, DD, GHI
@@ -26,7 +27,7 @@ CLI:
                                     config block for the user)
 """
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 
 _HELP_TEXT = """\

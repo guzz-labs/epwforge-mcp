@@ -352,6 +352,116 @@ async def generate_ensemble(
     return data
 
 
+# ── Tool 3b: generate_batch ────────────────────────────────────────────
+@mcp.tool()
+async def generate_batch(
+    configs: Annotated[
+        list[dict[str, Any]],
+        Field(
+            min_length=1,
+            max_length=10,
+            description=(
+                "Scenario configs (max 10). Each dict accepts the same keys as "
+                "generate_weather_file: lat, lon, basis, amy_year, ssp, year, "
+                "percentile, uhi, events, event_duration, intensity, intensity_auto, "
+                "smoke, smoke_intensity, smoke_duration, tmy_period. lat and lon "
+                "are required on every config. An optional `label` key is echoed "
+                "back in the result and used as part of the filename."
+            ),
+        ),
+    ],
+    save_to_dir: Annotated[
+        str,
+        Field(
+            description=(
+                "Directory to write per-scenario EPWs to. One file per config; "
+                "filenames are <label or cfgN>_<lat>_<lon>_<ssp_year>.epw. "
+                "Required — local generate_batch always writes to disk (use "
+                "compare_scenarios if you only want headline deltas, or "
+                "generate_weather_file individually for a single in-context EPW)."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Generate up to 10 EPWs in parallel and write each to a directory.
+
+    Mirrors the hosted `generate_batch` MCP tool, but local-appropriate:
+    instead of returning N signed URLs, it requires a `save_to_dir` and
+    writes each generated EPW directly to disk. Returns the list of saved
+    paths + bytes — keeps the agent context tiny even on a 10-scenario sweep.
+
+    Use this when:
+      - You want the actual EPW files, in a folder, ready to feed to
+        EnergyPlus / IES / OpenStudio.
+      - You're running a parametric sweep (different SSPs / years / UHI /
+        events) and want all the files at once instead of N tool calls.
+
+    For just headline deltas without the full files, use `compare_scenarios`.
+    For one-off individual generations, use `generate_weather_file`.
+
+    Example:
+      generate_batch(
+        configs=[
+          {"lat": 40.7, "lon": -74.0, "label": "baseline"},
+          {"lat": 40.7, "lon": -74.0, "ssp": "ssp245", "year": 2050, "label": "mid_century"},
+          {"lat": 40.7, "lon": -74.0, "ssp": "ssp585", "year": 2090, "percentile": 90,
+           "uhi": "urban", "events": "heatwave", "label": "worst_case"},
+        ],
+        save_to_dir="/tmp/nyc_sweep/",
+      )
+    """
+    client = _get_client()
+    out_dir = Path(save_to_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for cfg in configs:
+        if "lat" not in cfg or "lon" not in cfg:
+            raise ValueError("every config must include lat and lon")
+
+    async def _run_one(idx: int, cfg: dict[str, Any]) -> dict[str, Any]:
+        params = _build_epwforge_params(cfg)
+        try:
+            data = await client.get_json("/api/epwforge", params)
+        except EPWForgeError as e:
+            return {"index": idx, "label": cfg.get("label"), "ok": False, "error": str(e), "config": cfg}
+
+        b64 = data.get("epw_base64")
+        if not b64:
+            return {"index": idx, "label": cfg.get("label"), "ok": False, "error": "response missing epw_base64", "config": cfg}
+
+        # Filename: label_<lat>_<lon>_<ssp>_<year>.epw, falling back when
+        # label / ssp / year aren't set.
+        label = cfg.get("label") or f"cfg{idx + 1}"
+        scenario = "_".join(filter(None, [cfg.get("ssp"), str(cfg.get("year")) if cfg.get("year") else None]))
+        suffix = f"_{scenario}" if scenario else ""
+        fname = f"{label}_{cfg['lat']}_{cfg['lon']}{suffix}.epw"
+        fpath = out_dir / fname
+        n = write_epw_base64(b64, fpath)
+        return {
+            "index": idx,
+            "label": cfg.get("label"),
+            "ok": True,
+            "config": cfg,
+            "path": str(fpath),
+            "filename": fname,
+            "bytes_written": n,
+            "weather_basis": _weather_basis_synthesized(
+                cfg.get("basis", "tmy"),
+                cfg.get("amy_year"),
+                cfg.get("tmy_period", DEFAULT_TMY_PERIOD),
+            ),
+        }
+
+    results = list(await asyncio.gather(*(_run_one(i, c) for i, c in enumerate(configs))))
+    return {
+        "directory": str(out_dir),
+        "count": len(results),
+        "ok_count": sum(1 for r in results if r.get("ok")),
+        "results": results,
+        "meta": _meta("generate_batch", n_scenarios=len(configs), credits_consumed=len(configs)),
+    }
+
+
 # ── Tool 4 ─────────────────────────────────────────────────────────────
 @mcp.tool()
 async def find_station(

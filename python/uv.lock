@@ -208,7 +208,7 @@ wheels = [
 
 [[package]]
 name = "epwforge-mcp"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx", extra = ["http2"] },

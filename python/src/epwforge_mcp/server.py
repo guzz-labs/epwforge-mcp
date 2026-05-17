@@ -349,13 +349,21 @@ async def chart_weather(
         Literal["diurnal", "temp_carpet", "wind_rose", "monthly_boxplot", "comparison"],
         Field(description=(
             "Chart type. diurnal = monthly Max/Avg/Min hourly profile. "
-            "temp_carpet = 8760-cell heatmap of hour x day-of-year. "
+            "temp_carpet = heatmap of hour x day-of-year. "
             "wind_rose = polar bars of direction x speed. "
             "monthly_boxplot = Q1/median/Q3 + whiskers per month. "
-            "comparison = design-condition delta bars (needs urls). "
-            "diurnal and comparison run locally; the 3 new types route through hosted MCP."
+            "comparison = design-condition delta bars (needs urls)."
         )),
     ] = "diurnal",
+    resolution: Annotated[
+        Literal["preview", "full"],
+        Field(description=(
+            "temp_carpet only. 'preview' (default) ~150 KB with 32-color quantization. "
+            "'full' ~600 KB with per-cell rgb() — exact fidelity. Either way, "
+            "outputs over 50 KB auto-upload to Blob (hosted MCP) and return svg_url "
+            "instead of inline svg — keeps your context lean."
+        )),
+    ] = "preview",
     save_to: Annotated[
         str | None,
         Field(description="When set, writes SVG to this path and returns the path (saves agent context)."),
@@ -378,13 +386,25 @@ async def chart_weather(
 
     # New chart types (added in 0.3.0) live only in the hosted MCP; route there.
     if chart_type in ("temp_carpet", "wind_rose", "monthly_boxplot"):
-        payload: dict[str, Any] = {"chart_type": chart_type}
+        payload: dict[str, Any] = {"chart_type": chart_type, "resolution": resolution}
         if url: payload["url"] = url
         if urls: payload["urls"] = urls
         if config: payload["config"] = config
         result = await _call_hosted_mcp("chart_weather", payload)
-        if save_to and result.get("svg"):
-            return _save_svg(result["svg"], chart_type, result.get("source", "synthesized"), save_to)
+        # Hosted MCP may have auto-uploaded large SVGs to Blob and replaced
+        # the `svg` field with `svg_url`. Honor save_to for inline SVGs;
+        # fetch + save when we only got a URL.
+        if save_to:
+            svg_str = result.get("svg")
+            if svg_str:
+                return _save_svg(svg_str, chart_type, result.get("source", "synthesized"), save_to)
+            svg_url = result.get("svg_url")
+            if svg_url:
+                async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": "epwforge-mcp"}) as c:
+                    r = await c.get(svg_url)
+                    if r.status_code < 400:
+                        return _save_svg(r.text, chart_type, result.get("source", "synthesized"), save_to,
+                                         extra={"svg_url": svg_url})
         return result
 
     # Diurnal — needs a single EPW.

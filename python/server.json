@@ -1,25 +1,26 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.guzz-labs/epwforge-mcp",
-  "description": "EPW & DDY weather files for any location — TMY, CMIP6 SSPs, UHI, extreme events, smoke.",
+  "description": "Weather files (EPW/DDY) for any global location — search 17,000+ stations, analyze any EPW URL, render diurnal/wind-rose/temp-carpet charts, generate TMY/AMY/CMIP6-morphed/UHI/event/smoke scenarios + EnergyPlus DesignDay IDF. 3 of 4 tools work anonymously (no API key); generation tool charges credits (5 welcome credits free at signup).",
+  "websiteUrl": "https://epwforge.com",
   "repository": {
     "url": "https://github.com/guzz-labs/epwforge-mcp",
     "source": "github",
     "subfolder": "python"
   },
-  "version": "0.2.0",
+  "version": "0.3.1",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "epwforge-mcp",
-      "version": "0.1.6",
+      "version": "0.3.1",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "description": "Your EPWForge API key. Generate one at https://epwforge.com/account.",
-          "isRequired": true,
+          "description": "EPWForge API key — only required for generate_weather_file. Find/analyze/chart tools work without it. Generate a free key (any tier) at https://epwforge.com/account.",
+          "isRequired": false,
           "format": "string",
           "isSecret": true,
           "name": "EPWFORGE_API_KEY"
@@ -34,8 +35,8 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer token — your EPWForge API key (sk_live_...). Generate one at https://epwforge.com/account.",
-          "isRequired": true,
+          "description": "Optional — only required for generate_weather_file. Other tools (find_station, analyze_weather, chart_weather) work anonymously. Bearer EPWForge API key (sk_live_...) from https://epwforge.com/account, OR OAuth via the 'Add to Claude' flow.",
+          "isRequired": false,
           "isSecret": true,
           "format": "string",
           "value": "Bearer {api_key}"

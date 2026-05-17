@@ -249,6 +249,10 @@ async def analyze_weather(
         bool,
         Field(description="Adds ready-to-paste EnergyPlus SizingPeriod:DesignDay IDF objects to the response. Routes through hosted MCP."),
     ] = False,
+    units: Annotated[
+        Literal["imperial", "metric"],
+        Field(description="Output units (default imperial). When 'metric', temperatures are °C, HDD/CDD base 18 °C, elevation in m. Routes through hosted MCP."),
+    ] = "imperial",
 ) -> dict[str, Any]:
     """Compute design conditions, HDD/CDD, monthly stats, and peak days for one
     or more EPW files. No EPW content returned — stats only.
@@ -271,13 +275,15 @@ async def analyze_weather(
     if len(inputs_set) != 1:
         raise ValueError("analyze_weather requires exactly one of: url, urls, config")
 
-    # If any enrichment is requested, route through hosted MCP (it has the
-    # IDF emitter, full-ASHRAE computation, and improbability scorer in lib).
-    if include_full_ashrae or include_improbability or include_idf:
+    # If any enrichment (or metric units) is requested, route through hosted
+    # MCP — it has the IDF emitter, full-ASHRAE computation, improbability
+    # scorer, and the unit-converted summarizer all in lib.
+    if include_full_ashrae or include_improbability or include_idf or units == "metric":
         payload: dict[str, Any] = {
             "include_full_ashrae": include_full_ashrae,
             "include_improbability": include_improbability,
             "include_idf": include_idf,
+            "units": units,
         }
         if url: payload["url"] = url
         if urls: payload["urls"] = urls

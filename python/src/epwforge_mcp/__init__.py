@@ -1,37 +1,38 @@
 """epwforge-mcp — MCP server for EPWForge weather file generation.
 
 Exposes the EPWForge API as Model Context Protocol tools so AI agents
-(Claude, Cursor, etc.) can generate, morph, and download EPW weather
-files for building energy simulation.
+(Claude, Cursor, etc.) can find weather stations, analyze EPWs, render
+charts, and generate / morph weather files for building energy simulation.
+
+v0.2.0 — 4-tool consolidation. Read tools work WITHOUT an API key so
+prospects can explore EPWForge from Claude without signing up.
 
 Tools:
-    generate_weather_file       — Synthesize EPW from ERA5 (TMY/AMY/SSP + UHI + events + smoke)
-    generate_design_day         — DDY file with the same options
-    generate_ensemble           — Per-model CMIP6 ensemble of morphed EPWs
-    generate_batch              — Generate up to 10 EPWs in parallel into a save_to_dir
-    get_station_epw             — Download a published OneBuilding/GuzzStation TMY file
-    find_station                — Search OneBuilding/GuzzStation library near a location
-    analyze_epw                 — Download an EPW URL and summarize design conditions, DD, GHI
-    compare_scenarios           — Sensitivity sweep over multiple configs, returns only deltas
-    chart_diurnal_profile       — SVG chart: monthly Max/Avg/Min hourly temperature
-    chart_compare_scenarios     — SVG chart: bar chart of design-condition deltas
+    find_station          (no auth)  Search GuzzStations catalog (17k+ stations)
+    analyze_weather       (no auth)  Stats from EPW URL or synthesized config
+    chart_weather         (no auth)  Diurnal / comparison SVG from URL or config
+    generate_weather_file (auth)     Delivers EPW/DDY; charges credits
 
-Authentication:
-    Set EPWFORGE_API_KEY in your MCP client config.
-    Generate an API key at https://epwforge.com/account.
+The 3 read tools work for anyone — no signup needed. Only
+generate_weather_file requires an EPWFORGE_API_KEY (free at
+https://epwforge.com/account; signup includes 5 welcome credits).
 
 CLI:
-    epwforge-mcp                  — run the stdio MCP server (default)
-    epwforge-mcp install ...      — one-command setup for Claude Desktop /
-                                    Claude Code / Cursor (writes the MCP
-                                    config block for the user)
+    epwforge-mcp                  Run the stdio MCP server (default)
+    epwforge-mcp install ...      One-command setup for Claude Desktop /
+                                  Claude Code / Cursor
+    epwforge-mcp --version        Print package version and exit
 """
 
-__version__ = "0.1.6"
+__version__ = "0.2.0"
 
 
 _HELP_TEXT = """\
 epwforge-mcp — MCP server for the EPWForge weather-file API.
+
+v0.2.0 — 4-tool consolidation. find_station, analyze_weather, and
+chart_weather work without authentication. Only generate_weather_file
+requires EPWFORGE_API_KEY.
 
 Usage:
   epwforge-mcp                              Run the stdio MCP server (default)
@@ -40,21 +41,17 @@ Usage:
   epwforge-mcp --version                    Print package version and exit
   epwforge-mcp --help                       Print this help and exit
 
-Environment variables (when running the server):
-  EPWFORGE_API_KEY    Bearer token for the EPWForge API (required)
+Environment variables:
+  EPWFORGE_API_KEY    Bearer token (only needed for generate_weather_file)
   EPWFORGE_BASE_URL   Override the API host (default https://epwforge.com)
 
-Generate an API key at https://epwforge.com/account.
+Generate an API key — free, any tier — at https://epwforge.com/account.
 """
 
 
 def main() -> None:
     """Top-level CLI entry — dispatches between server (default), `install`,
     and informational flags (--version / --help / -h).
-
-    Informational flags are handled BEFORE the server dispatch so they don't
-    require EPWFORGE_API_KEY to be set (the server-side validator would
-    otherwise reject `epwforge-mcp --version` with a confusing error).
     """
     import sys
     args = sys.argv[1:]

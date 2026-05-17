@@ -2,9 +2,9 @@
 
 <!-- mcp-name: io.github.guzz-labs/epwforge-mcp -->
 
-> MCP server for [EPWForge](https://epwforge.com) — give Claude, Cursor, and other AI agents the ability to generate, morph, and download weather files for building energy simulation.
+> MCP server for [EPWForge](https://epwforge.com) — give Claude, Cursor, and other AI agents the ability to search, analyze, chart, and generate weather files for building energy simulation.
 
-**Status:** Live on PyPI and the [official MCP Registry](https://registry.modelcontextprotocol.io). One tool call → one EPW. Production backend, Pro-tier features wired in.
+**v0.2.0 — 4-tool consolidation.** Three of the four tools (`find_station`, `analyze_weather`, `chart_weather`) work **without an API key**, so anyone can explore EPWForge from Claude without signing up. Only `generate_weather_file` (which delivers actual EPW/DDY files) requires authentication and charges credits.
 
 ## What is EPWForge?
 
@@ -15,42 +15,62 @@ EPWForge generates and morphs weather files (`.epw`, `.ddy`) for building energy
 - **CMIP6 climate morphing** — apply future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0, SSP5-8.5) at 7 warming percentiles
 - **Urban Heat Island adjustment** — Stewart & Oke LCZ presets (suburban / urban / dense_urban)
 - **Extreme event injection** — heat waves, cold snaps, humidity events, wind events, with auto-compound blending and per-event intensity (1-10 slider, AR6-auto-fill under SSP)
-- **Wildfire smoke overlays** — CAMS-derived AOD with Beer-Lambert solar attenuation, RH bump, temp shift
-- **Per-model CMIP6 ensembles** — up to 21 morphed EPWs (one per model) for inter-model uncertainty analysis
+- **Wildfire smoke overlays** — CAMS-derived AOD with Beer-Lambert solar attenuation
+- **Per-model CMIP6 ensembles** — ~20 morphed EPWs (one per model) for inter-model uncertainty
 
 ## Tools
 
-Four MCP tools, each mapping 1:1 to an EPWForge API endpoint:
+| Tool | Auth | Cost | What it does |
+|---|---|---|---|
+| `find_station` | None | Free | Search the GuzzStations catalog (17k+ weather stations). Returns matches with `epw_url` ready to pass to `analyze_weather` / `chart_weather`. |
+| `analyze_weather` | None | Free | Design conditions, HDD/CDD, monthly stats, peak days. Accepts a `url` (existing EPW), `urls` (compare 2+), or `config` (synthesize on the fly with morphing/UHI/events/smoke — stats only, file never delivered). |
+| `chart_weather` | None | Free | SVG chart from EPW URL(s) or a synthesized config. `chart_type="diurnal"` (monthly hourly profile) or `chart_type="comparison"` (design-condition deltas). |
+| `generate_weather_file` | API key | 1–10 credits | Generates and delivers EPW or DDY. Single file (1 credit), scenarios batch up to 10 (1 credit each), or per-model CMIP6 ensemble (10 credits). |
 
-| Tool | Purpose |
-|---|---|
-| `generate_weather_file` | The workhorse. One call returns an EPW with any combination of TMY/AMY/SSP basis, UHI, extreme events, and smoke. |
-| `generate_design_day` | DDY file for EnergyPlus design-day sizing, computed from the same enriched hourly data. |
-| `generate_ensemble` | Per-model CMIP6 ensemble — one morphed EPW per climate model (Pro plan). |
-| `find_station` | Search weather stations near a coordinate (returns name, WMO ID, distance). |
+The 3 read tools route purely through public endpoints when given a URL — pure local fetch + parse. When given a `config` they route through the hosted EPWForge MCP at `https://epwforge.com/api/mcp` so the morph/UHI/event/smoke pipeline runs on EPWForge infrastructure (the synthesized EPW never reaches the caller).
 
-Most users will only ever need `generate_weather_file`. Compose options into one call instead of chaining tools.
+## Quick examples
 
-## Quick example
+### No-auth: explore Boston's future climate
 
 ```python
-# What an AI agent might call to get a worst-case design weather file:
-generate_weather_file(
-    lat=40.71,
-    lon=-74.01,
-    ssp="ssp585",      # SSP5-8.5 emissions
-    year=2090,         # End-of-century
-    percentile=90,     # 90th percentile warming
-    uhi="urban",       # Stewart-Oke urban LCZ
-    events="heatwave,hothumid",  # Auto-compound heat + humidity
-    event_duration=14,
-    smoke=True,
-    smoke_intensity=5,
-    save_to="/tmp/nyc_2090_worst_case.epw",
-)
+# 1. find a nearby station
+stations = await find_station(query="Boston", max_results=3)
+epw_url = stations["stations"][0]["files"][0]["epw_url"]
+
+# 2. analyze that EPW (purely local — fetches and parses)
+stats = await analyze_weather(url=epw_url)
+# → cooling 89.1 F, heating 16.0 F, HDD/CDD 5265/914 ...
+
+# 3. preview what a 2050 SSP585 + urban-UHI scenario looks like
+# (routes through hosted MCP — runs the pipeline, returns stats only)
+future = await analyze_weather(config={
+    "lat": 42.36, "lon": -71.06,
+    "ssp": "ssp585", "year": 2050, "uhi": "urban",
+})
+# → cooling 92.3 F (+3.2), heating 26.2 F (+10.2) ...
+
+# 4. chart it
+svg = await chart_weather(config={
+    "lat": 42.36, "lon": -71.06, "ssp": "ssp585", "year": 2050,
+}, chart_type="diurnal")
 ```
 
-Returns `{filename, saved_to, bytes_written, scenario, lat, lon, ...}` — no inline base64 bloat when `save_to` is set.
+### With auth: deliver an EPW
+
+```python
+# Requires EPWFORGE_API_KEY in env
+await generate_weather_file(
+    lat=40.71, lon=-74.01,
+    ssp="ssp585", year=2090, percentile=90,
+    uhi="urban",
+    events="heatwave,hothumid",
+    event_duration=14,
+    smoke=True, smoke_intensity=5,
+    save_to="/tmp/nyc_2090_worst_case.epw",
+)
+# → {saved_to, bytes_written, weather_basis, ...}
+```
 
 ## Install
 
@@ -58,11 +78,31 @@ Returns `{filename, saved_to, bytes_written, scenario, lat, lon, ...}` — no in
 pip install epwforge-mcp
 ```
 
+Or use `uvx` (no install needed):
+
+```bash
+uvx epwforge-mcp
+```
+
 Requires Python ≥ 3.10.
 
 ## Connecting to Claude / Cursor
 
-Add to your MCP client config (Claude Desktop's `claude_desktop_config.json`, Cursor's MCP settings, etc.):
+### Read-only (no signup)
+
+```json
+{
+  "mcpServers": {
+    "epwforge": {
+      "command": "epwforge-mcp"
+    }
+  }
+}
+```
+
+That's it — `find_station`, `analyze_weather`, and `chart_weather` all work immediately. `generate_weather_file` will return a clear "API key required" message if invoked.
+
+### With API key (unlocks `generate_weather_file`)
 
 ```json
 {
@@ -77,34 +117,66 @@ Add to your MCP client config (Claude Desktop's `claude_desktop_config.json`, Cu
 }
 ```
 
-Generate an API key at [epwforge.com/account](https://epwforge.com/account).
+**Free signup** at [epwforge.com/account](https://epwforge.com/account) gets you an API key and 5 welcome credits.
 
-## Plan requirements
+### One-command setup
 
-| Feature | Plan |
+```bash
+# With API key
+epwforge-mcp install --api-key sk_live_...
+
+# Read-only (no key)
+epwforge-mcp install --no-api-key
+```
+
+Auto-detects Claude Desktop / Claude Code / Cursor configs.
+
+## Pricing & credit costs
+
+Generation is the only paid surface:
+
+| Action | Credits |
 |---|---|
-| TMYx / AMY basis (`generate_weather_file`, `generate_design_day` without SSP) | Starter |
-| UHI / events / smoke adjustments | Starter |
-| SSP future-climate morphing | Pro |
-| `generate_ensemble` (per-model CMIP6) | Pro |
-| `find_station` | Free |
+| Unmodified TMY download via `generate_weather_file` | 0 (free) |
+| Single EPW / DDY / SSP / UHI / event-modified file | 1 |
+| 4-file scenarios batch | 2 (50% bundle discount) |
+| Per-model CMIP6 ensemble (~20 EPWs) | 10 |
+| `find_station`, `analyze_weather`, `chart_weather` | 0 (always free) |
 
-Tier enforcement happens at the API; the MCP surfaces 403s as `"Plan upgrade required — upgrade at https://epwforge.com/pricing"`.
+Plans: Free ($0, 5 lifetime credits) · Starter ($49/mo, 10) · Pro ($149/mo, 50) · Pro+ ($249/mo, 100). Full pricing at [epwforge.com/pricing](https://epwforge.com/pricing).
+
+## Breaking changes from 0.1.x
+
+v0.2.0 is a tool-name rewrite. The old tool surface is gone — agents calling `generate_design_day`, `generate_ensemble`, `generate_batch`, `get_station_epw`, `analyze_epw`, `compare_scenarios`, `chart_diurnal_profile`, or `chart_compare_scenarios` will get "tool not found" errors.
+
+Migration map:
+
+| Old tool | New equivalent |
+|---|---|
+| `generate_weather_file` | `generate_weather_file` (same name, same params) |
+| `generate_design_day` | `generate_weather_file(format="ddy")` |
+| `generate_ensemble` | `generate_weather_file(ssp=, year=, ensemble=True)` |
+| `generate_batch` | `generate_weather_file(scenarios=[{...}, {...}])` |
+| `get_station_epw(url)` | `analyze_weather(url=url)` for stats; `chart_weather(url=url)` for charts; or fetch the URL directly — `find_station` returns public `epw_url` fields anyone can `httpx.get()`. |
+| `analyze_epw(url)` | `analyze_weather(url=url)` |
+| `compare_scenarios([cfg1, cfg2])` | `analyze_weather(urls=[url1, url2])` — or `chart_weather(urls=[url1, url2], chart_type="comparison")` |
+| `chart_diurnal_profile(url)` | `chart_weather(url=url, chart_type="diurnal")` |
+| `chart_compare_scenarios(...)` | `chart_weather(urls=[...], chart_type="comparison")` |
 
 ## Environment variables
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `EPWFORGE_API_KEY` | Bearer token for the EPWForge API | required |
+| `EPWFORGE_API_KEY` | Bearer token (only needed for `generate_weather_file`) | unset |
 | `EPWFORGE_BASE_URL` | Override the API host (mainly for testing) | `https://epwforge.com` |
 
 ## Behavior notes
 
-- **File output:** every file-generating tool accepts `save_to` (or `save_to_dir` for ensembles). When provided, the EPW is written to disk and the tool returns the path. When omitted, the EPW is returned base64-encoded in the response (≈ 250 KB for a typical year). **`save_to` is recommended** to keep agent context lean.
-- **Compound events:** `events="heatwave,hothumid"` automatically blends `hothumid`'s humidity onto the heatwave at 50%. `events="coldsnap,coldwindy"` does the same for wind onto a cold snap. The secondary is folded into the primary stitch — not stitched separately.
-- **Event placement:** events are anchored at the cell's hottest day (heat-family) or coldest day (cold-family) and centered for the requested duration. The peak day's diurnal cycle is sustained across the event, producing 30 days of peak heat for a 30-day request — not a stretched 14-day shape.
-- **Smoke + heat compound:** when both are active, smoke aligns to the same anchor day and pads with peak AOD on the heat event's shoulders so solar is fully attenuated across the entire event window.
-- **AR6 SSP auto-fill:** with an SSP scenario active, unspecified event intensities are auto-filled from IPCC AR6 ensemble factors for the cell's region. Cold events stay at intensity 5 (no future amplification) because recent observations (Texas 2021, polar-vortex disruption) don't yet support the AR6 ensemble's cold-side dampening. Pass `intensity_auto=false` to disable.
+- **File output:** `generate_weather_file` accepts `save_to` (single mode) or `save_to_dir` (ensemble / batch). When set, files write to disk and only paths/byte counts come back — keeps agent context lean. Without it, files return base64-encoded inline.
+- **Compound events:** `events="heatwave,hothumid"` automatically blends humidity onto the heatwave. `events="coldsnap,coldwindy"` does the same for wind onto cold. Folded into the primary stitch — not stitched separately.
+- **Event placement:** events anchor at the cell's hottest day (heat-family) or coldest day (cold-family) and are centered for the requested duration. The peak day's diurnal cycle is sustained across the event.
+- **AR6 SSP auto-fill:** with an SSP scenario active, unspecified event intensities auto-fill from IPCC AR6 ensemble factors. Cold events stay at intensity 5 (no future amplification — recent obs don't support cold-side dampening). Pass `intensity_auto=False` to disable.
+- **Anon morphing safety:** when `analyze_weather` or `chart_weather` is called with a `config`, the request routes to the hosted MCP at `epwforge.com/api/mcp`. The pipeline runs on EPWForge infra; the synthesized EPW never reaches the local client. Returns stats / SVG only.
 
 ## Development
 
@@ -112,7 +184,7 @@ Tier enforcement happens at the API; the MCP surfaces 403s as `"Plan upgrade req
 git clone https://github.com/guzz-labs/epwforge-mcp
 cd epwforge-mcp/python
 uv sync
-uv run epwforge-mcp  # runs the stdio server
+uv run epwforge-mcp
 ```
 
 To test against a local API:
@@ -126,7 +198,8 @@ uv run epwforge-mcp
 ## Links
 
 - **Website:** [epwforge.com](https://epwforge.com)
-- **API docs / OpenAPI spec:** [epwforge.com/docs](https://epwforge.com/docs)
+- **MCP landing page:** [epwforge.com/mcp](https://epwforge.com/mcp)
+- **Pricing:** [epwforge.com/pricing](https://epwforge.com/pricing)
 - **Maker:** [Guzzlabs](https://guzzlabs.com)
 - **Issues:** [github.com/guzz-labs/epwforge-mcp/issues](https://github.com/guzz-labs/epwforge-mcp/issues)
 

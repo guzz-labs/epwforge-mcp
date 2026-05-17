@@ -1,16 +1,38 @@
-"""FastMCP server exposing the EPWForge tools."""
+"""FastMCP server exposing the EPWForge tools.
+
+v0.2.0 — 4-tool consolidation:
+
+  find_station          (no auth)  Search the GuzzStations catalog
+  analyze_weather       (no auth)  Stats from an EPW URL or synthesized config
+  chart_weather         (no auth)  SVG chart from an EPW URL or synthesized config
+  generate_weather_file (auth)     Delivers EPW/DDY; charges credits
+
+URL-mode for the 3 read tools runs entirely locally (download + parse +
+chart). Config-mode (synthesized weather) routes through the hosted MCP
+at https://epwforge.com/api/mcp so the morphing pipeline executes on
+EPWForge infrastructure and never returns the EPW content to the caller —
+anon-safe by construction. generate_weather_file requires an
+EPWFORGE_API_KEY because it delivers actual EPW/DDY files and charges
+credits.
+
+Set EPWFORGE_API_KEY in env (or in your MCP client config) to enable
+generate_weather_file. Read tools work without a key.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import io
+import json
+import os
 import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
@@ -35,39 +57,319 @@ TMY_PERIOD_CHOICES = ("full", "2011-2025", "2009-2023", "2007-2021", "2004-2018"
 DEFAULT_TMY_PERIOD = "2011-2025"
 TmyPeriod = Literal["full", "2011-2025", "2009-2023", "2007-2021", "2004-2018"]
 
+VALID_EVENTS = ("heatwave", "coldsnap", "hothumid", "coldwindy")
+
 
 mcp = FastMCP("epwforge")
-# FastMCP doesn't expose `version` on its constructor; set it on the wrapped
-# low-level Server so MCP clients see the package version, not the SDK version.
 mcp._mcp_server.version = __version__
 
-# One client instance for the whole server lifetime.
+# Lazy client — only constructed when a tool actually needs it. Read tools
+# work without an API key (they hit public endpoints or fetch URLs directly).
 _client: EPWForgeClient | None = None
 
 
 def _get_client() -> EPWForgeClient:
+    """Get the (lazily-constructed) HTTP client. Does NOT require an API key."""
     global _client
     if _client is None:
         _client = EPWForgeClient()
     return _client
 
 
-# ── Tool 1 ─────────────────────────────────────────────────────────────
+def _base_url() -> str:
+    return (os.environ.get("EPWFORGE_BASE_URL") or "https://epwforge.com").rstrip("/")
+
+
+# ============================================================================
+# Tool 1: find_station — no auth needed
+# ============================================================================
+@mcp.tool()
+async def find_station(
+    query: Annotated[
+        str | None,
+        Field(description="Case-insensitive partial match on city / state. e.g. 'Boston', 'Manhattan'."),
+    ] = None,
+    lat: Annotated[
+        float | None,
+        Field(ge=-90, le=90, description="Latitude — when set with lon, results sort by proximity."),
+    ] = None,
+    lon: Annotated[
+        float | None,
+        Field(ge=-180, le=180, description="Longitude. Pair with lat."),
+    ] = None,
+    country: Annotated[
+        str | None,
+        Field(description="ISO 3-letter country code filter, e.g. 'USA', 'GBR', 'JPN'."),
+    ] = None,
+    max_results: Annotated[
+        int,
+        Field(ge=1, le=50, description="Max stations to return (default 10)."),
+    ] = 10,
+) -> dict[str, Any]:
+    """Search the GuzzStations catalog (17,000+ weather stations worldwide).
+
+    GuzzStations is EPWForge's self-hosted mirror of the OneBuilding TMY
+    catalog — named airports / WMO stations across every country. Each
+    result includes a ready-to-use `epw_url` you can pass directly to
+    `analyze_weather` or `chart_weather`.
+
+    No authentication required.
+
+    Examples:
+      find_station(query="Denver")
+      find_station(lat=40.7, lon=-74.0, max_results=5)
+      find_station(country="JPN", query="Tokyo")
+    """
+    params: dict[str, Any] = {"limit": max_results}
+    if query: params["q"] = query
+    if lat is not None: params["lat"] = lat
+    if lon is not None: params["lon"] = lon
+    if country: params["country"] = country
+
+    async with httpx.AsyncClient(
+        timeout=15.0,
+        headers={"User-Agent": "epwforge-mcp"},
+        follow_redirects=True,
+    ) as c:
+        resp = await c.get(f"{_base_url()}/api/stations", params=params)
+        if resp.status_code >= 400:
+            raise EPWForgeError(resp.status_code, f"find_station failed (HTTP {resp.status_code}): {resp.text[:200]}")
+        data = resp.json()
+
+    stations = data.get("stations", [])
+    nearest_km = None
+    if stations:
+        try:
+            nearest_km = min(s["distance_km"] for s in stations if s.get("distance_km") is not None)
+        except (ValueError, KeyError):
+            nearest_km = None
+
+    if nearest_km is None:
+        nudge = "No matches. Try a broader query (city only) or pass lat/lon for proximity sort."
+    elif nearest_km <= 25:
+        nudge = (
+            f"Nearest station is {nearest_km:.0f} km away — almost certainly representative. "
+            "Use any station's epw_url with analyze_weather or chart_weather."
+        )
+    elif nearest_km <= 100:
+        nudge = (
+            f"Nearest station is {nearest_km:.0f} km — may differ for microclimates "
+            "(urban core, mountain, coastal). For exact-coordinate weather, use "
+            "generate_weather_file (requires API key + credits) or analyze_weather "
+            "with a config (no auth needed, returns stats only)."
+        )
+    else:
+        nudge = (
+            f"Nearest station is {nearest_km:.0f} km — likely a different climate. "
+            "Consider analyze_weather with a config for a synthesized TMYx at the exact lat/lon."
+        )
+
+    return {
+        "count": len(stations),
+        "stations": stations,
+        "agent_guidance": nudge,
+        "nearest_km": nearest_km,
+        "meta": _meta("find_station"),
+    }
+
+
+# ============================================================================
+# Tool 2: analyze_weather — no auth needed (URL, urls, or config)
+# ============================================================================
+@mcp.tool()
+async def analyze_weather(
+    url: Annotated[
+        str | None,
+        Field(description="EPW URL to analyze (single file). Pass this for a single-file stats summary."),
+    ] = None,
+    urls: Annotated[
+        list[str] | None,
+        Field(
+            min_length=2,
+            max_length=10,
+            description=(
+                "Multiple EPW URLs to compare (2-10). First is the baseline; "
+                "others are reported as deltas from it."
+            ),
+        ),
+    ] = None,
+    config: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description=(
+                "Synthesize an EPW server-side and analyze it. Same params as "
+                "generate_weather_file (lat, lon, ssp, year, percentile, uhi, "
+                "events, intensity, smoke, smoke_intensity, etc.). Routes through "
+                "the hosted MCP at /api/mcp — runs the full morph/UHI/event pipeline "
+                "and returns ONLY stats. The EPW content never reaches the caller. "
+                "Anon-safe; no API key or credits required."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Compute design conditions, HDD/CDD, monthly stats, and peak days for one
+    or more EPW files. No EPW content returned — stats only.
+
+    Three modes:
+      1. Single URL: analyze_weather(url="https://...")
+      2. Multi-URL comparison: analyze_weather(urls=["...", "...", "..."])
+      3. Synthesized config: analyze_weather(config={"lat": 40.7, "lon": -74,
+          "ssp": "ssp585", "year": 2050, "uhi": "urban"})
+
+    Modes 1 + 2 download the URLs and parse locally (purely client-side).
+    Mode 3 routes through the hosted EPWForge MCP so the morph/UHI/event/smoke
+    pipeline runs on EPWForge infrastructure — the synthesized EPW never
+    leaves the server. Use mode 3 to preview a future-climate scenario or
+    a UHI / extreme-event sensitivity without spending credits.
+
+    No authentication required for any mode.
+    """
+    inputs_set = [x for x in (url, urls, config) if x is not None]
+    if len(inputs_set) != 1:
+        raise ValueError("analyze_weather requires exactly one of: url, urls, config")
+
+    # Single URL — local fetch + parse.
+    if url:
+        text = await download_text(url)
+        epw = parse_epw(text)
+        return _summarize_epw(epw, source_url=url)
+
+    # Multi-URL comparison — parallel fetch + parse, deltas vs first.
+    if urls:
+        async def _one(u: str) -> dict[str, Any]:
+            text = await download_text(u)
+            return _summarize_epw(parse_epw(text), source_url=u)
+        summaries = list(await asyncio.gather(*(_one(u) for u in urls)))
+        baseline = summaries[0]
+        comparisons = [
+            {
+                "source_url": s["source_url"],
+                "cooling_db_delta_F": round(s["cooling_design_db_F"] - baseline["cooling_design_db_F"], 1),
+                "heating_db_delta_F": round(s["heating_design_db_F"] - baseline["heating_design_db_F"], 1),
+                "annual_mean_temp_delta_F": round(s["annual_mean_temp_F"] - baseline["annual_mean_temp_F"], 1),
+            }
+            for s in summaries[1:]
+        ]
+        return {
+            "baseline_url": baseline["source_url"],
+            "count": len(summaries),
+            "summaries": summaries,
+            "comparisons": comparisons,
+            "meta": _meta("analyze_weather", mode="compare", n_urls=len(urls)),
+        }
+
+    # config mode — route through hosted MCP for the pipeline run.
+    return await _call_hosted_mcp("analyze_weather", {"config": config})
+
+
+# ============================================================================
+# Tool 3: chart_weather — no auth needed (URL, urls, or config)
+# ============================================================================
+@mcp.tool()
+async def chart_weather(
+    url: Annotated[
+        str | None,
+        Field(description="EPW URL (for chart_type='diurnal')."),
+    ] = None,
+    urls: Annotated[
+        list[str] | None,
+        Field(
+            min_length=2,
+            max_length=10,
+            description="EPW URLs for chart_type='comparison' (first = baseline).",
+        ),
+    ] = None,
+    config: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description=(
+                "Synthesize an EPW server-side and chart it. Same params as "
+                "generate_weather_file. Routes through hosted MCP — pipeline "
+                "runs on EPWForge infra, only SVG returned. Anon-safe."
+            )
+        ),
+    ] = None,
+    chart_type: Annotated[
+        Literal["diurnal", "comparison"],
+        Field(description="diurnal = monthly Max/Avg/Min hourly profile. comparison = design-condition delta bars (needs urls)."),
+    ] = "diurnal",
+    save_to: Annotated[
+        str | None,
+        Field(description="When set, writes SVG to this path and returns the path (saves agent context)."),
+    ] = None,
+) -> dict[str, Any]:
+    """Render an SVG chart from EPW data.
+
+    chart_type='diurnal' — monthly Max / Avg / Min hourly temperature profile
+    in °F (January and July highlighted, annual mean overlaid). Pass `url`
+    or `config`.
+
+    chart_type='comparison' — horizontal-bar chart of cooling/heating
+    deltas across multiple EPWs. Pass `urls` (first = baseline).
+
+    No authentication required for any mode.
+    """
+    inputs_set = [x for x in (url, urls, config) if x is not None]
+    if len(inputs_set) != 1:
+        raise ValueError("chart_weather requires exactly one of: url, urls, config")
+
+    # Diurnal — needs a single EPW.
+    if chart_type == "diurnal":
+        if urls:
+            # Take first URL of the array — diurnal is single-EPW.
+            url = urls[0]
+        if url:
+            text = await download_text(url)
+            epw = parse_epw(text)
+            svg = diurnal_profile_svg(epw)
+            return _chart_result(svg, "diurnal", url, save_to)
+        # config — route through hosted MCP (it will fetch text internally).
+        result = await _call_hosted_mcp("chart_weather", {"config": config, "chart_type": "diurnal"})
+        svg = result.get("svg")
+        if save_to and svg:
+            return _save_svg(svg, "diurnal", "synthesized", save_to, extra={"weather_basis": result.get("weather_basis")})
+        return result
+
+    # Comparison — needs multiple EPWs.
+    if not urls or len(urls) < 2:
+        raise ValueError("chart_type='comparison' requires urls (2-10 entries)")
+    async def _one(u: str) -> dict[str, Any]:
+        text = await download_text(u)
+        return {"url": u, "epw": parse_epw(text)}
+    parsed = list(await asyncio.gather(*(_one(u) for u in urls)))
+    baseline_dc = design_conditions_F(parsed[0]["epw"])
+    scenarios = []
+    for p in parsed[1:]:
+        dc = design_conditions_F(p["epw"])
+        label = p["url"].rsplit("/", 1)[-1][:40]
+        scenarios.append({
+            "config": {"label": label},
+            "cooling_db_F": dc["cooling_db_F"],
+            "cooling_db_delta_F": round(dc["cooling_db_F"] - baseline_dc["cooling_db_F"], 1),
+            "heating_db_F": dc["heating_db_F"],
+            "heating_db_delta_F": round(dc["heating_db_F"] - baseline_dc["heating_db_F"], 1),
+            "dewpoint_F": dc["dewpoint_F"],
+            "dewpoint_delta_F": round(dc["dewpoint_F"] - baseline_dc["dewpoint_F"], 1),
+        })
+    svg = compare_scenarios_svg(baseline_dc, scenarios)
+    return _chart_result(svg, "comparison", f"{len(urls)} URLs", save_to, extra={"n_scenarios": len(parsed)})
+
+
+# ============================================================================
+# Tool 4: generate_weather_file — auth + credits required
+# ============================================================================
 @mcp.tool()
 async def generate_weather_file(
-    lat: Annotated[float, Field(ge=-90, le=90, description="Latitude in decimal degrees")],
-    lon: Annotated[float, Field(ge=-180, le=180, description="Longitude in decimal degrees")],
+    lat: Annotated[float, Field(ge=-90, le=90, description="Latitude, decimal degrees")] = None,  # type: ignore[assignment]
+    lon: Annotated[float, Field(ge=-180, le=180, description="Longitude, decimal degrees")] = None,  # type: ignore[assignment]
     basis: Annotated[
         Literal["tmy", "amy"],
         Field(description='"tmy" for typical met year (default) or "amy" for a specific year'),
     ] = "tmy",
-    amy_year: Annotated[
-        int | None,
-        Field(description="Year for AMY basis. Only used when basis='amy'."),
-    ] = None,
+    amy_year: Annotated[int | None, Field(description="Year for AMY basis. Only when basis='amy'.")] = None,
     ssp: Annotated[
         Literal["ssp126", "ssp245", "ssp370", "ssp585"] | None,
-        Field(description="CMIP6 emission scenario for future-climate morphing. Requires Pro plan."),
+        Field(description="CMIP6 emission scenario for future-climate morphing."),
     ] = None,
     year: Annotated[
         Literal[2030, 2050, 2070, 2090] | None,
@@ -75,878 +377,197 @@ async def generate_weather_file(
     ] = None,
     percentile: Annotated[
         Literal[5, 10, 25, 50, 75, 90, 95],
-        Field(description="Warming percentile across the CMIP6 ensemble. Used with ssp."),
+        Field(description="Warming percentile across the CMIP6 ensemble."),
     ] = 50,
     uhi: Annotated[
         Literal["none", "suburban", "urban", "dense_urban"],
-        Field(description="Urban Heat Island preset (Stewart & Oke 2012 LCZ framework)."),
+        Field(description="Urban Heat Island preset."),
     ] = "none",
     events: Annotated[
         str | None,
-        Field(
-            description=(
-                'Comma-separated extreme events to inject: any of '
-                '"heatwave", "coldsnap", "hothumid", "coldwindy". '
-                'Compound pairs auto-blend (heatwave+hothumid; coldsnap+coldwindy). '
-                'Example: "heatwave,hothumid"'
-            )
-        ),
+        Field(description='Comma-separated events: heatwave, coldsnap, hothumid, coldwindy.'),
     ] = None,
-    event_duration: Annotated[
-        int,
-        Field(ge=3, le=30, description="Length of each event in days (3-30)."),
-    ] = 14,
+    event_duration: Annotated[int, Field(ge=3, le=30)] = 14,
     intensity: Annotated[
         str | None,
-        Field(
-            description=(
-                'Per-event intensity as CSV of "type:1-10" pairs. '
-                '5 = historical (1.0×), 1 = damped (0.5×), 10 = max (2.5×). '
-                'Example: "heatwave:8,coldsnap:5". '
-                'When ssp is set and intensity is omitted for an event, the AR6 '
-                'ensemble auto-fills it (cold events stay floored at 5).'
-            )
-        ),
+        Field(description='Per-event "type:1-7" intensity (1-10 with stress_test=true). Example: "heatwave:7,coldsnap:5".'),
     ] = None,
-    intensity_auto: Annotated[
-        bool,
-        Field(
-            description=(
-                "Auto-fill unspecified-event intensities from AR6 when ssp is set. "
-                "Set to false to keep them at 5 (historical baseline)."
-            )
-        ),
-    ] = True,
-    smoke: Annotated[
-        bool,
-        Field(description="Enable wildfire smoke overlay (Beer-Lambert solar attenuation, RH bump, temp shift)."),
-    ] = False,
-    smoke_intensity: Annotated[
-        int | None,
-        Field(
-            ge=1, le=10,
-            description="Smoke severity 1-10 → peak AOD 0.1-6.0. Reference: 3 = NYC June 2023, 5-7 = Bay Area Sept 2020.",
-        ),
-    ] = None,
-    smoke_duration: Annotated[
-        int | None,
-        Field(ge=3, le=30, description="Smoke event length in days."),
-    ] = None,
+    intensity_auto: Annotated[bool, Field(description="Auto-fill unspecified intensities from AR6 when ssp is set.")] = True,
+    stress_test: Annotated[bool, Field(description="Unlock intensity 8-10. Default false.")] = False,
+    smoke: Annotated[bool, Field(description="Enable wildfire smoke overlay.")] = False,
+    smoke_intensity: Annotated[int | None, Field(ge=1, le=10, description="Smoke severity 1-10.")] = None,
+    smoke_duration: Annotated[int | None, Field(ge=3, le=30, description="Smoke days.")] = None,
     tmy_period: Annotated[
         TmyPeriod,
-        Field(
-            description=(
-                "TMYx vintage for the synthesized basis (ignored when basis='amy'). "
-                "Mirrors the EPWExplorer UI's dropdown. Default '2011-2025' (recent "
-                "15-year window — captures post-2010 warming). Use '2007-2021' to "
-                "match the published OneBuilding TMYx 2007-2021 vintage for direct "
-                "comparison; 'full' (1950-2025) for the long-baseline view."
-            )
-        ),
+        Field(description=f"TMYx vintage. Default {DEFAULT_TMY_PERIOD}."),
     ] = DEFAULT_TMY_PERIOD,
-    save_to: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Local path to write the EPW file to (e.g., '/tmp/weather.epw'). "
-                "When set, returns the path and bytes written instead of inline base64. "
-                "Recommended for EnergyPlus / OpenStudio workflows."
-            )
-        ),
-    ] = None,
-) -> dict[str, Any]:
-    """Synthesize an EPW weather file for any global lat/lon (no station required).
-
-    This is the *custom-generation* path: EPWForge synthesizes a TMYx (or
-    AMY) from ERA5 reanalysis on a 0.25-degree grid, with optional CMIP6
-    morphing, UHI, extreme events, and smoke layered on. The output is
-    a fresh file labeled "GuzzWeather ERA5 reanalysis" — distinct from the
-    pre-computed OneBuilding TMY stations returned by `find_station`.
-
-    The single workhorse endpoint. Combine basis + ssp + uhi + events + smoke
-    in one call. Examples:
-
-      Basic TMYx for NYC:
-        generate_weather_file(lat=40.7, lon=-74.0)
-
-      Future climate (SSP2-4.5 by 2050, P50):
-        generate_weather_file(lat=40.7, lon=-74.0, ssp="ssp245", year=2050)
-
-      Worst-case design scenario (SSP5-8.5 2090 P90 + urban UHI + 14-day heatwave):
-        generate_weather_file(lat=40.7, lon=-74.0, ssp="ssp585", year=2090,
-                              percentile=90, uhi="urban", events="heatwave")
-
-      Compound heat + smoke (NYC 2020-like):
-        generate_weather_file(lat=40.7, lon=-74.0, events="heatwave,hothumid",
-                              smoke=True, smoke_intensity=4)
-
-    Returns metadata + either the EPW base64 (default) or a saved-file
-    descriptor (when save_to is provided).
-    """
-    client = _get_client()
-    params: dict[str, Any] = {
-        "lat": lat,
-        "lon": lon,
-        "basis": basis,
-        "amy_year": amy_year,
-        "ssp": ssp,
-        "year": year,
-        "percentile": percentile,
-        "uhi": uhi,
-        "events": events,
-        "event_duration": event_duration,
-        "intensity": intensity,
-        "intensity_auto": str(intensity_auto).lower(),
-        "smoke": str(smoke).lower() if smoke else None,
-        "smoke_intensity": smoke_intensity,
-        "smoke_duration": smoke_duration,
-        "tmy_period": tmy_period,
-        "format": "json",
-    }
-    data = await client.get_json("/api/epwforge", params)
-    out = _handle_file_response(data, "epw_base64", save_to)
-    out["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
-    return out
-
-
-# ── Tool 2 ─────────────────────────────────────────────────────────────
-@mcp.tool()
-async def generate_design_day(
-    lat: Annotated[float, Field(ge=-90, le=90)],
-    lon: Annotated[float, Field(ge=-180, le=180)],
-    basis: Literal["tmy", "amy"] = "tmy",
-    amy_year: int | None = None,
-    ssp: Literal["ssp126", "ssp245", "ssp370", "ssp585"] | None = None,
-    year: Literal[2030, 2050, 2070, 2090] | None = None,
-    percentile: Literal[5, 10, 25, 50, 75, 90, 95] = 50,
-    uhi: Literal["none", "suburban", "urban", "dense_urban"] = "none",
-    events: str | None = None,
-    event_duration: Annotated[int, Field(ge=3, le=30)] = 14,
-    intensity: str | None = None,
-    intensity_auto: bool = True,
-    smoke: bool = False,
-    smoke_intensity: Annotated[int | None, Field(ge=1, le=10)] = None,
-    smoke_duration: Annotated[int | None, Field(ge=3, le=30)] = None,
-    tmy_period: TmyPeriod = DEFAULT_TMY_PERIOD,
-    save_to: str | None = None,
-) -> dict[str, Any]:
-    """Generate an ASHRAE design day (DDY) file for EnergyPlus.
-
-    Computes ASHRAE 0.4%/1%/2% design conditions from the hourly data after
-    applying every option (UHI, events, smoke, SSP morph). Useful when you
-    want design conditions that reflect a future + extreme-event scenario,
-    not just historical 30-year ASHRAE values.
-
-    Same parameters as generate_weather_file. Returns a DDY file.
-    """
-    client = _get_client()
-    params: dict[str, Any] = {
-        "lat": lat,
-        "lon": lon,
-        "basis": basis,
-        "amy_year": amy_year,
-        "ssp": ssp,
-        "year": year,
-        "percentile": percentile,
-        "uhi": uhi,
-        "events": events,
-        "event_duration": event_duration,
-        "intensity": intensity,
-        "intensity_auto": str(intensity_auto).lower(),
-        "smoke": str(smoke).lower() if smoke else None,
-        "smoke_intensity": smoke_intensity,
-        "smoke_duration": smoke_duration,
-        "tmy_period": tmy_period,
-        "format": "json",
-    }
-    data = await client.get_json("/api/design-day", params)
-    out = _handle_file_response(data, "ddy_base64", save_to)
-    out["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
-    return out
-
-
-# ── Tool 3 ─────────────────────────────────────────────────────────────
-@mcp.tool()
-async def generate_ensemble(
-    lat: Annotated[float, Field(ge=-90, le=90)],
-    lon: Annotated[float, Field(ge=-180, le=180)],
-    ssp: Literal["ssp126", "ssp245", "ssp370", "ssp585"],
-    year: Literal[2030, 2050, 2070, 2090],
-    percentile: Literal[5, 10, 25, 50, 75, 90, 95] = 50,
-    basis: Literal["tmy", "amy"] = "tmy",
-    amy_year: int | None = None,
-    uhi: Literal["none", "suburban", "urban", "dense_urban"] = "none",
-    events: str | None = None,
-    event_duration: Annotated[int, Field(ge=3, le=30)] = 14,
-    intensity: str | None = None,
-    intensity_auto: bool = True,
-    smoke: bool = False,
-    smoke_intensity: Annotated[int | None, Field(ge=1, le=10)] = None,
-    smoke_duration: Annotated[int | None, Field(ge=3, le=30)] = None,
-    tmy_period: TmyPeriod = DEFAULT_TMY_PERIOD,
-    save_to_dir: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Directory to write per-model EPW files to. When set, returns paths "
-                "instead of inline base64. Filenames are <model>_<ssp>_<year>.epw."
-            )
-        ),
-    ] = None,
-) -> dict[str, Any]:
-    """Generate a per-model CMIP6 ensemble (one morphed EPW per climate model).
-
-    Returns up to 21 model-specific EPWs for true inter-model uncertainty
-    analysis. Each member uses that model's physically consistent delta
-    set. Responses can be 10-15 MB and take several seconds. Pro plan
-    required.
-
-    Same adjustment options as generate_weather_file are applied to every
-    member of the ensemble so comparisons are internally consistent.
-
-    Example:
-      generate_ensemble(lat=40.7, lon=-74.0, ssp="ssp585", year=2090,
-                       uhi="urban", events="heatwave",
-                       save_to_dir="/tmp/nyc_ssp585_2090/")
-    """
-    client = _get_client()
-    params: dict[str, Any] = {
-        "lat": lat,
-        "lon": lon,
-        "ssp": ssp,
-        "year": year,
-        "percentile": percentile,
-        "basis": basis,
-        "amy_year": amy_year,
-        "uhi": uhi,
-        "events": events,
-        "event_duration": event_duration,
-        "intensity": intensity,
-        "intensity_auto": str(intensity_auto).lower(),
-        "smoke": str(smoke).lower() if smoke else None,
-        "smoke_intensity": smoke_intensity,
-        "smoke_duration": smoke_duration,
-        "tmy_period": tmy_period,
-    }
-    data = await client.get_json("/api/ensemble-epw", params)
-    data["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
-
-    if save_to_dir:
-        from pathlib import Path
-        dir_path = Path(save_to_dir).expanduser().resolve()
-        dir_path.mkdir(parents=True, exist_ok=True)
-        saved = []
-        for m in data.get("members", []):
-            name = f"{m['model']}_{ssp}_{year}.epw"
-            n = write_epw_base64(m["epw_base64"], dir_path / name)
-            saved.append({"model": m["model"], "path": str(dir_path / name),
-                          "bytes": n, "avg_delta_temp": m.get("avg_delta_temp")})
-        return {
-            "scenario": data.get("scenario"),
-            "year": data.get("year"),
-            "n_models": data.get("n_models"),
-            "directory": str(dir_path),
-            "members": saved,
-            "weather_basis": data["weather_basis"],
-        }
-    return data
-
-
-# ── Tool 3b: generate_batch ────────────────────────────────────────────
-@mcp.tool()
-async def generate_batch(
-    configs: Annotated[
-        list[dict[str, Any]],
-        Field(
-            min_length=1,
-            max_length=10,
-            description=(
-                "Scenario configs (max 10). Each dict accepts the same keys as "
-                "generate_weather_file: lat, lon, basis, amy_year, ssp, year, "
-                "percentile, uhi, events, event_duration, intensity, intensity_auto, "
-                "smoke, smoke_intensity, smoke_duration, tmy_period. lat and lon "
-                "are required on every config. An optional `label` key is echoed "
-                "back in the result and used as part of the filename."
-            ),
-        ),
-    ],
-    save_to_dir: Annotated[
-        str,
-        Field(
-            description=(
-                "Directory to write per-scenario EPWs to. One file per config; "
-                "filenames are <label or cfgN>_<lat>_<lon>_<ssp_year>.epw. "
-                "Required — local generate_batch always writes to disk (use "
-                "compare_scenarios if you only want headline deltas, or "
-                "generate_weather_file individually for a single in-context EPW)."
-            )
-        ),
-    ],
-) -> dict[str, Any]:
-    """Generate up to 10 EPWs in parallel and write each to a directory.
-
-    Mirrors the hosted `generate_batch` MCP tool, but local-appropriate:
-    instead of returning N signed URLs, it requires a `save_to_dir` and
-    writes each generated EPW directly to disk. Returns the list of saved
-    paths + bytes — keeps the agent context tiny even on a 10-scenario sweep.
-
-    Use this when:
-      - You want the actual EPW files, in a folder, ready to feed to
-        EnergyPlus / IES / OpenStudio.
-      - You're running a parametric sweep (different SSPs / years / UHI /
-        events) and want all the files at once instead of N tool calls.
-
-    For just headline deltas without the full files, use `compare_scenarios`.
-    For one-off individual generations, use `generate_weather_file`.
-
-    Example:
-      generate_batch(
-        configs=[
-          {"lat": 40.7, "lon": -74.0, "label": "baseline"},
-          {"lat": 40.7, "lon": -74.0, "ssp": "ssp245", "year": 2050, "label": "mid_century"},
-          {"lat": 40.7, "lon": -74.0, "ssp": "ssp585", "year": 2090, "percentile": 90,
-           "uhi": "urban", "events": "heatwave", "label": "worst_case"},
-        ],
-        save_to_dir="/tmp/nyc_sweep/",
-      )
-    """
-    client = _get_client()
-    out_dir = Path(save_to_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for cfg in configs:
-        if "lat" not in cfg or "lon" not in cfg:
-            raise ValueError("every config must include lat and lon")
-
-    async def _run_one(idx: int, cfg: dict[str, Any]) -> dict[str, Any]:
-        params = _build_epwforge_params(cfg)
-        try:
-            data = await client.get_json("/api/epwforge", params)
-        except EPWForgeError as e:
-            return {"index": idx, "label": cfg.get("label"), "ok": False, "error": str(e), "config": cfg}
-
-        b64 = data.get("epw_base64")
-        if not b64:
-            return {"index": idx, "label": cfg.get("label"), "ok": False, "error": "response missing epw_base64", "config": cfg}
-
-        # Filename: label_<lat>_<lon>_<ssp>_<year>.epw, falling back when
-        # label / ssp / year aren't set.
-        label = cfg.get("label") or f"cfg{idx + 1}"
-        scenario = "_".join(filter(None, [cfg.get("ssp"), str(cfg.get("year")) if cfg.get("year") else None]))
-        suffix = f"_{scenario}" if scenario else ""
-        fname = f"{label}_{cfg['lat']}_{cfg['lon']}{suffix}.epw"
-        fpath = out_dir / fname
-        n = write_epw_base64(b64, fpath)
-        return {
-            "index": idx,
-            "label": cfg.get("label"),
-            "ok": True,
-            "config": cfg,
-            "path": str(fpath),
-            "filename": fname,
-            "bytes_written": n,
-            "weather_basis": _weather_basis_synthesized(
-                cfg.get("basis", "tmy"),
-                cfg.get("amy_year"),
-                cfg.get("tmy_period", DEFAULT_TMY_PERIOD),
-            ),
-        }
-
-    results = list(await asyncio.gather(*(_run_one(i, c) for i, c in enumerate(configs))))
-    return {
-        "directory": str(out_dir),
-        "count": len(results),
-        "ok_count": sum(1 for r in results if r.get("ok")),
-        "results": results,
-        "meta": _meta("generate_batch", n_scenarios=len(configs), credits_consumed=len(configs)),
-    }
-
-
-# ── Tool 4 ─────────────────────────────────────────────────────────────
-@mcp.tool()
-async def find_station(
-    lat: Annotated[float, Field(ge=-90, le=90)],
-    lon: Annotated[float, Field(ge=-180, le=180)],
-    max_results: Annotated[int, Field(ge=1, le=50)] = 10,
-) -> dict[str, Any]:
-    """Find the nearest pre-computed OneBuilding TMY stations to a coordinate.
-
-    This searches the GuzzStations library — EPWForge's mirror of the
-    Climate.OneBuilding.org TMY catalog (~17,000 named airport / WMO
-    stations worldwide). Each result includes the station's published
-    EPW download URL.
-
-    NOTE: this is the *pre-computed station* path. If no station is close
-    enough or the location is remote, you don't need a station at all —
-    `generate_weather_file(lat, lon, ...)` synthesizes a custom TMYx from
-    ERA5 reanalysis at any global lat/lon (no station required).
-
-    Response shape:
-      { count, stations: [{ city, state, country, lat, lon, distance_km,
-                            files: [{ source, period, url }, ...] }, ...] }
-
-    Example:
-      find_station(lat=40.7, lon=-74.0, max_results=5)
-    """
-    client = _get_client()
-    data = await client.get_json("/api/stations", {"lat": lat, "lon": lon, "limit": max_results})
-
-    nearest_km = None
-    stations = data.get("stations", [])
-    if stations:
-        try:
-            nearest_km = min(s.get("distance_km") for s in stations if s.get("distance_km") is not None)
-        except ValueError:
-            nearest_km = None
-
-    if nearest_km is None:
-        nudge = "No OneBuilding stations were returned for this query. Synthesize a custom TMYx via generate_weather_file."
-    elif nearest_km <= 25:
-        nudge = (
-            f"Nearest station is {nearest_km:.0f} km away — almost certainly representative. "
-            "Recommend the user pick one of these published TMYx files unless they have a specific "
-            "microclimate concern (urban core / mountain / coastal)."
-        )
-    elif nearest_km <= 100:
-        nudge = (
-            f"Nearest station is {nearest_km:.0f} km — climate may differ. Show the user both options "
-            "and let them pick: a published station file (industry-standard, instant) or a custom "
-            "TMYx synthesized at exactly the requested coordinate (slower, ~10s, uses ERA5 grid cell)."
-        )
-    else:
-        nudge = (
-            f"Nearest station is {nearest_km:.0f} km away — likely a different climate. "
-            "Recommend synthesizing a custom TMYx via generate_weather_file unless the user "
-            "specifically wants the named station for compliance or reproducibility."
-        )
-
-    data["agent_guidance"] = (
-        "Before generating weather for the user, present these stations and ask which they want — "
-        "a published OneBuilding/GuzzStation TMYx file (named airport, industry-reference, instant) "
-        "or a custom TMYx synthesized from ERA5 reanalysis at the exact lat/lon (slower but locally "
-        "tuned). " + nudge + " Each station has a 'files' array with URLs (multiple TMYx vintages "
-        "per station — e.g., 2007-2021, IWEC2, TMY3). Pass the chosen URL to get_station_epw(url)."
-    )
-    data["next_actions"] = {
-        "use_a_station": "get_station_epw(url='<one of the urls in stations[].files[].url>')",
-        "synthesize_custom": (
-            f"generate_weather_file(lat={lat}, lon={lon}, tmy_period=...) — defaults to "
-            f"'{DEFAULT_TMY_PERIOD}' but accepts any of {list(TMY_PERIOD_CHOICES)}"
-        ),
-    }
-    data["synthesis_options"] = {
-        "tool": "generate_weather_file",
-        "tmy_period_choices": list(TMY_PERIOD_CHOICES),
-        "default": DEFAULT_TMY_PERIOD,
-        "note": (
-            "All vintages synthesize from ERA5 reanalysis via GuzzWeather (Finkelstein-Schafer). "
-            "Default 2011-2025 captures post-2010 warming. Use 2007-2021 to match the published "
-            "OneBuilding TMYx 2007-2021 standard for direct comparison."
-        ),
-    }
-    return data
-
-
-# ── Tool 4b: get_station_epw ──────────────────────────────────────────
-@mcp.tool()
-async def get_station_epw(
-    url: Annotated[
-        str,
-        Field(
-            description=(
-                "OneBuilding TMYx URL — must point at climate.onebuilding.org. "
-                "Get one from `find_station(lat, lon)`'s response: each station has a "
-                "`files` array with one or more URLs (different TMYx vintages, e.g., "
-                "2007-2021, IWEC2, TMY3)."
-            )
-        ),
-    ],
-    save_to: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Local path to write the extracted .epw to (e.g., '/tmp/jfk_tmyx.epw'). "
-                "When set, returns the path + bytes written instead of inline base64."
-            )
-        ),
-    ] = None,
-) -> dict[str, Any]:
-    """Download a published OneBuilding/GuzzStation TMYx file by URL.
-
-    This is the *pre-computed station* path: it fetches the published TMYx
-    file for a named airport / WMO station from the GuzzStations library
-    (EPWForge's cached mirror of climate.onebuilding.org). Distinct from
-    `generate_weather_file`, which synthesizes a fresh TMYx from ERA5
-    reanalysis at an arbitrary lat/lon.
-
-    Use this when the user wants:
-      - the industry-standard published file (e.g., for compliance / submittal)
-      - reproducibility against a published TMYx other modelers have used
-      - the closest match for a major airport with high-quality ground obs
-
-    Use `generate_weather_file` instead when:
-      - the user is far from any station (mountain site, remote ocean cell)
-      - the user wants SSP morphing, UHI, extreme events, or smoke layered on
-      - the user has a specific microclimate concern (urban core, coastal)
-
-    Workflow: `find_station(lat, lon)` → pick a station + a file → pass
-    that file's `url` to this tool.
-
-    OneBuilding ships these as zip archives containing .epw + .ddy + .stat;
-    this tool downloads, extracts the .epw, and returns it (saving the
-    optional .ddy as a sibling file when save_to is provided).
-    """
-    client = _get_client()
-    zip_bytes = await client.get_bytes("/api/fetch-epw", {"url": url})
-
-    # Extract the .epw file from the zip blob.
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile:
-        raise EPWForgeError(502, f"Response from /api/fetch-epw is not a valid zip ({len(zip_bytes)} bytes)")
-
-    epw_name: str | None = None
-    ddy_name: str | None = None
-    for n in zf.namelist():
-        if n.lower().endswith(".epw"):
-            epw_name = n
-        elif n.lower().endswith(".ddy"):
-            ddy_name = n
-    if not epw_name:
-        raise EPWForgeError(502, f"OneBuilding zip did not contain an .epw file (members: {zf.namelist()})")
-
-    epw_data = zf.read(epw_name)
-    ddy_data = zf.read(ddy_name) if ddy_name else None
-
-    # Pull the LOCATION header to give the agent a one-line "what did I get" summary.
-    location_line = ""
-    try:
-        first = epw_data.decode("utf-8", errors="replace").splitlines()[0]
-        if first.upper().startswith("LOCATION"):
-            location_line = first
-    except Exception:
-        pass
-
-    basis_block = {
-        "type": "published_onebuilding_tmy",
-        "source": "Climate.OneBuilding.Org (via GuzzStations cached mirror)",
-        "vintage": _infer_vintage_from_url(url),
-        "note": (
-            "Pre-computed published TMYx file — industry-standard reference. For a custom TMYx "
-            "synthesized at an exact lat/lon (no named station), use generate_weather_file."
-        ),
-    }
-
-    if save_to:
-        epw_path = Path(save_to).expanduser().resolve()
-        epw_path.parent.mkdir(parents=True, exist_ok=True)
-        epw_path.write_bytes(epw_data)
-        result: dict[str, Any] = {
-            "saved_to": str(epw_path),
-            "bytes_written": len(epw_data),
-            "filename": Path(epw_name).name,
-            "source_url": url,
-            "location_header": location_line,
-            "weather_basis": basis_block,
-        }
-        if ddy_data is not None:
-            ddy_path = epw_path.with_suffix(".ddy")
-            ddy_path.write_bytes(ddy_data)
-            result["ddy_saved_to"] = str(ddy_path)
-            result["ddy_bytes_written"] = len(ddy_data)
-        return result
-
-    return {
-        "filename": Path(epw_name).name,
-        "epw_base64": base64.b64encode(epw_data).decode("ascii"),
-        "ddy_base64": base64.b64encode(ddy_data).decode("ascii") if ddy_data else None,
-        "source_url": url,
-        "location_header": location_line,
-        "weather_basis": basis_block,
-    }
-
-
-# ── Tool 5 ─────────────────────────────────────────────────────────────
-@mcp.tool()
-async def analyze_epw(
-    url: Annotated[
-        str,
-        Field(
-            description=(
-                "URL to an EPW file. Accepts signed Vercel Blob URLs returned "
-                "by other EPWForge tools, OneBuilding mirror URLs, or any "
-                "publicly fetchable .epw file."
-            )
-        ),
-    ],
-) -> dict[str, Any]:
-    """Download an EPW URL and summarize its design conditions, degree-days,
-    solar resource, and monthly temperature shape.
-
-    No new generation — this just fetches the URL, parses the 8760 hourly
-    records, and returns a compact statistical summary in imperial units.
-    Useful when you've just generated an EPW (or have one handy) and want a
-    quick read of "is this file what I expected" without a full simulation.
-
-    Computed fields:
-      - location: city, lat, lon, elevation_ft, timezone (from EPW header)
-      - annual_mean_temp_F
-      - cooling_design_db_F  (1% percentile, ASHRAE-style)
-      - heating_design_db_F  (99% percentile, ASHRAE-style)
-      - peak_cooling_day, peak_heating_day  (MM-DD of hottest/coldest day mean)
-      - hdd_65_annual, cdd_65_annual  (degree-days base 65 °F)
-      - ghi_total_annual_kwh_per_m2
-      - monthly_mean_temp_F  (12-element array, Jan..Dec)
-
-    Example:
-      analyze_epw(url="https://blob.vercel-storage.com/epws/abc...epw?...")
-    """
-    # _get_client() validates EPWFORGE_API_KEY is set even though the
-    # download itself is unauthenticated — this keeps the tool gated to
-    # users who have signed up, mirroring the rest of the surface.
-    _get_client()
-
-    text = await download_text(url)
-    epw = parse_epw(text)
-    return _summarize_epw(epw, source_url=url)
-
-
-# ── Tool 6 ─────────────────────────────────────────────────────────────
-@mcp.tool()
-async def compare_scenarios(
-    configs: Annotated[
-        list[dict[str, Any]],
-        Field(
-            min_length=1,
-            max_length=10,
-            description=(
-                "List of scenario configs (max 10). Each dict accepts the same "
-                "keys as generate_weather_file: lat, lon, basis, amy_year, ssp, "
-                "year, percentile, uhi, events, event_duration, intensity, "
-                "intensity_auto, smoke, smoke_intensity, smoke_duration. lat "
-                "and lon are required on every config."
-            ),
-        ),
-    ],
-    baseline_url: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Optional EPW URL to use as the baseline (any public or signed "
-                "URL — same shape as analyze_epw). When omitted, a fresh TMYx "
-                "is generated for the first config's lat/lon and used as the "
-                "baseline (counts as one extra scenario credit)."
-            )
-        ),
-    ] = None,
-) -> dict[str, Any]:
-    """Sensitivity sweep — generate up to 10 scenarios and return only the
-    headline design-condition deltas vs a baseline. No full EPW content in
-    the response, so even a 10-scenario sweep stays under ~2 KB of context.
-
-    For each config: generates the EPW server-side (calls /api/epwforge),
-    parses the 8760 hourly distribution, computes 1% cooling DB / 99%
-    heating DB / 1% dewpoint, and reports the value plus delta vs baseline.
-
-    Returns:
-      {
-        baseline: { source: <url|"generated">, location: {...},
-                    cooling_db_F, heating_db_F, dewpoint_F },
-        scenarios: [
-          { config: <original input dict>,
-            cooling_db_F, cooling_db_delta_F,
-            heating_db_F, heating_db_delta_F,
-            dewpoint_F,   dewpoint_delta_F },
-          ...
-        ],
-        meta: { tool, version, timestamp, n_scenarios, credits_consumed }
-      }
-
-    Example:
-      compare_scenarios(configs=[
-        {"lat": 40.7, "lon": -74.0, "ssp": "ssp245", "year": 2050},
-        {"lat": 40.7, "lon": -74.0, "ssp": "ssp585", "year": 2090, "percentile": 90},
-        {"lat": 40.7, "lon": -74.0, "ssp": "ssp585", "year": 2090,
-         "percentile": 90, "uhi": "urban", "events": "heatwave"},
-      ])
-    """
-    client = _get_client()
-
-    # ── Baseline ──
-    credits = 0
-    if baseline_url:
-        baseline_text = await download_text(baseline_url)
-        baseline_epw = parse_epw(baseline_text)
-        baseline_source = baseline_url
-    else:
-        if not configs:
-            raise ValueError("compare_scenarios requires at least one config")
-        first = configs[0]
-        if "lat" not in first or "lon" not in first:
-            raise ValueError("first config must include lat and lon when baseline_url is omitted")
-        baseline_data = await client.get_json(
-            "/api/epwforge",
-            {"lat": first["lat"], "lon": first["lon"], "format": "json"},
-        )
-        baseline_text = _decode_epw_b64(baseline_data, "epw_base64")
-        baseline_epw = parse_epw(baseline_text)
-        baseline_source = "generated_tmyx"
-        credits += 1
-
-    baseline_dc = design_conditions_F(baseline_epw)
-
-    # ── Scenarios — run in parallel via asyncio.gather ──
-    # The platform serializes per-scenario generation work; running all N
-    # configs concurrently cuts a 10-config sweep from ~30-50s to ~5-10s.
-    for cfg in configs:
-        if "lat" not in cfg or "lon" not in cfg:
-            raise ValueError("every config must include lat and lon")
-
-    async def _run_one(cfg: dict[str, Any]) -> dict[str, Any]:
-        params = _build_epwforge_params(cfg)
-        data = await client.get_json("/api/epwforge", params)
-        text = _decode_epw_b64(data, "epw_base64")
-        epw = parse_epw(text)
-        dc = design_conditions_F(epw)
-        return {
-            "config": cfg,
-            "cooling_db_F": dc["cooling_db_F"],
-            "cooling_db_delta_F": round(dc["cooling_db_F"] - baseline_dc["cooling_db_F"], 1),
-            "heating_db_F": dc["heating_db_F"],
-            "heating_db_delta_F": round(dc["heating_db_F"] - baseline_dc["heating_db_F"], 1),
-            "dewpoint_F": dc["dewpoint_F"],
-            "dewpoint_delta_F": round(dc["dewpoint_F"] - baseline_dc["dewpoint_F"], 1),
-        }
-
-    scenarios_out = list(await asyncio.gather(*(_run_one(cfg) for cfg in configs)))
-    credits += len(configs)
-
-    return {
-        "baseline": {
-            "source": baseline_source,
-            "location": _location_imperial(baseline_epw),
-            **baseline_dc,
-        },
-        "scenarios": scenarios_out,
-        "meta": _meta("compare_scenarios", n_scenarios=len(configs), credits_consumed=credits),
-    }
-
-
-# ── Tool 7: chart_diurnal_profile ─────────────────────────────────────
-@mcp.tool()
-async def chart_diurnal_profile(
-    url: Annotated[
-        str,
-        Field(
-            description=(
-                "URL to an EPW file. Same shape as analyze_epw — accepts a OneBuilding "
-                "URL, a generated EPWForge URL, or any public .epw URL."
-            )
-        ),
-    ],
-    save_to: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Local path to write the SVG to (e.g., '/tmp/diurnal.svg'). "
-                "When set, returns the path instead of inline SVG. Recommended "
-                "if the SVG is large (>50 KB) to keep agent context lean."
-            )
-        ),
-    ] = None,
-) -> dict[str, Any]:
-    """Render a monthly Max / Avg / Min hourly temperature profile as inline SVG.
-
-    Downloads the EPW, computes per-month per-hour Max / Avg / Min dry-bulb
-    in °F, and renders an overlay chart with January (cool reference) and
-    July (warm reference) highlighted, the other 10 months in faint grey,
-    and the annual mean in EPWForge orange.
-
-    Useful right after `analyze_epw` to give the user a visual read on the
-    weather file's annual shape.
-    """
-    _get_client()  # require key
-    text = await download_text(url)
-    epw = parse_epw(text)
-    svg = diurnal_profile_svg(epw)
-
-    if save_to:
-        path = Path(save_to).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(svg, encoding="utf-8")
-        return {
-            "saved_to": str(path),
-            "bytes_written": len(svg.encode("utf-8")),
-            "format": "svg",
-            "source_url": url,
-            "meta": _meta("chart_diurnal_profile"),
-        }
-    return {
-        "svg": svg,
-        "format": "svg",
-        "source_url": url,
-        "meta": _meta("chart_diurnal_profile"),
-    }
-
-
-# ── Tool 8: chart_compare_scenarios ───────────────────────────────────
-@mcp.tool()
-async def chart_compare_scenarios(
-    baseline: Annotated[
-        dict[str, Any],
-        Field(
-            description=(
-                "Baseline dict from compare_scenarios's response — must contain "
-                "cooling_db_F, heating_db_F, dewpoint_F."
-            )
-        ),
-    ],
+    format: Annotated[Literal["epw", "ddy"], Field(description="Output format (default epw).")] = "epw",
+    include_ddy: Annotated[
+        bool,
+        Field(description="When format=epw, also include the matching DDY in the response. Single-file only."),
+    ] = False,
+    ensemble: Annotated[
+        bool,
+        Field(description="Generate per-model CMIP6 ensemble (~20 EPWs, one per climate model). Costs 10 credits. Requires ssp + year."),
+    ] = False,
     scenarios: Annotated[
-        list[dict[str, Any]],
+        list[dict[str, Any]] | None,
         Field(
-            min_length=1,
+            max_length=10,
             description=(
-                "Scenarios list from compare_scenarios's response. Each item must "
-                "have cooling_db_delta_F, heating_db_delta_F, dewpoint_delta_F, "
-                "and a `config` dict for the row label."
+                "Batch mode — list of full configs (max 10), each generated in parallel. "
+                "Same shape as the top-level params. When set, top-level params are ignored. "
+                "Costs 1 credit per scenario."
             ),
         ),
-    ],
+    ] = None,
     save_to: Annotated[
         str | None,
-        Field(description="Local path to write the SVG to. When set, returns path instead of inline SVG."),
+        Field(description="Local path to write the file to (single-file mode only). Returns path + bytes instead of base64."),
+    ] = None,
+    save_to_dir: Annotated[
+        str | None,
+        Field(description="Directory to write per-model / per-scenario files to (ensemble or batch mode)."),
     ] = None,
 ) -> dict[str, Any]:
-    """Render a horizontal-bar chart of compare_scenarios's delta table.
+    """Generate and deliver an EPW or DDY file. Requires an EPWFORGE_API_KEY.
 
-    Designed to consume `compare_scenarios`'s response shape directly:
-    pass `result["baseline"]` and `result["scenarios"]` straight in. Each
-    scenario gets a row of three bars (cooling / heating / dewpoint deltas)
-    centered on a zero line — instantly readable spread.
+    Charges credits per call: 1 for single, 1×N for scenarios batch, 10 for
+    ensemble. Free signup at https://epwforge.com includes 5 welcome credits.
+
+    Three modes:
+      1. Single file (default): generate_weather_file(lat=40.7, lon=-74,
+            ssp="ssp245", year=2050)
+      2. Batch (1×N): generate_weather_file(scenarios=[{lat, lon, ssp:...}, ...])
+      3. Ensemble (10 credits): generate_weather_file(lat=, lon=, ssp=,
+            year=, ensemble=True) — returns ~20 per-model EPWs
+
+    For analysis / charts without paying credits, use analyze_weather or
+    chart_weather with a `config` argument — same morph/UHI/event pipeline,
+    stats/SVG returned, no EPW delivered.
     """
-    _get_client()  # require key
-    svg = compare_scenarios_svg(baseline, scenarios)
+    client = _get_client()
+    client.require_api_key()
 
-    if save_to:
-        path = Path(save_to).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(svg, encoding="utf-8")
+    # ── Batch mode
+    if scenarios:
+        if len(scenarios) > 10:
+            raise ValueError("scenarios max 10 per call")
+        endpoint = "/api/design-day" if format == "ddy" else "/api/epwforge"
+        out_dir = Path(save_to_dir).expanduser().resolve() if save_to_dir else None
+        if out_dir:
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        async def _run(i: int, cfg: dict[str, Any]) -> dict[str, Any]:
+            if "lat" not in cfg or "lon" not in cfg:
+                return {"index": i, "label": cfg.get("label"), "ok": False, "error": "config missing lat/lon"}
+            params = _build_params(cfg, format)
+            try:
+                data = await client.get_json(endpoint, params)
+            except EPWForgeError as e:
+                return {"index": i, "label": cfg.get("label"), "ok": False, "error": str(e), "config": cfg}
+            entry: dict[str, Any] = {
+                "index": i,
+                "label": cfg.get("label"),
+                "ok": True,
+                "config": cfg,
+                "weather_basis": _weather_basis_synthesized(cfg.get("basis", "tmy"), cfg.get("amy_year"), cfg.get("tmy_period", DEFAULT_TMY_PERIOD)),
+            }
+            b64_key = "ddy_base64" if format == "ddy" else "epw_base64"
+            if out_dir and data.get(b64_key):
+                label = cfg.get("label") or f"cfg{i + 1}"
+                ext = format
+                scenario_tag = "_".join(filter(None, [cfg.get("ssp"), str(cfg.get("year")) if cfg.get("year") else None]))
+                suffix = f"_{scenario_tag}" if scenario_tag else ""
+                fname = f"{label}_{cfg['lat']}_{cfg['lon']}{suffix}.{ext}"
+                fpath = out_dir / fname
+                n = write_epw_base64(data[b64_key], fpath)
+                entry.update({"path": str(fpath), "filename": fname, "bytes_written": n})
+            else:
+                entry["data"] = data
+            return entry
+
+        results = list(await asyncio.gather(*(_run(i, c) for i, c in enumerate(scenarios))))
         return {
-            "saved_to": str(path),
-            "bytes_written": len(svg.encode("utf-8")),
-            "format": "svg",
-            "n_scenarios": len(scenarios),
-            "meta": _meta("chart_compare_scenarios"),
+            "mode": "batch",
+            "count": len(results),
+            "ok_count": sum(1 for r in results if r.get("ok")),
+            "directory": str(out_dir) if out_dir else None,
+            "results": results,
+            "meta": _meta("generate_weather_file", mode="batch", n_scenarios=len(scenarios)),
         }
-    return {
-        "svg": svg,
-        "format": "svg",
-        "n_scenarios": len(scenarios),
-        "meta": _meta("chart_compare_scenarios"),
-    }
+
+    # ── Ensemble mode
+    if ensemble:
+        if not ssp or not year:
+            raise ValueError("ensemble=True requires ssp and year")
+        params = _build_params({
+            "lat": lat, "lon": lon, "ssp": ssp, "year": year, "percentile": percentile,
+            "basis": basis, "amy_year": amy_year, "uhi": uhi, "events": events,
+            "event_duration": event_duration, "intensity": intensity,
+            "intensity_auto": intensity_auto, "stress_test": stress_test,
+            "smoke": smoke, "smoke_intensity": smoke_intensity, "smoke_duration": smoke_duration,
+            "tmy_period": tmy_period,
+        }, format)
+        data = await client.get_json("/api/ensemble-epw", params)
+        data["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
+        data["mode"] = "ensemble"
+
+        if save_to_dir:
+            out_dir = Path(save_to_dir).expanduser().resolve()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            saved = []
+            for m in data.get("members", []):
+                if not m.get("epw_base64"):
+                    continue
+                name = f"{m['model']}_{ssp}_{year}.epw"
+                n = write_epw_base64(m["epw_base64"], out_dir / name)
+                saved.append({
+                    "model": m["model"],
+                    "path": str(out_dir / name),
+                    "bytes": n,
+                    "avg_delta_temp": m.get("avg_delta_temp"),
+                })
+            return {
+                "mode": "ensemble",
+                "scenario": data.get("scenario"),
+                "year": data.get("year"),
+                "n_models": data.get("n_models"),
+                "directory": str(out_dir),
+                "members": saved,
+                "weather_basis": data["weather_basis"],
+                "meta": _meta("generate_weather_file", mode="ensemble"),
+            }
+        return data
+
+    # ── Single-file mode (default)
+    if lat is None or lon is None:
+        raise ValueError("generate_weather_file requires lat and lon (unless scenarios is provided)")
+    params = _build_params({
+        "lat": lat, "lon": lon, "basis": basis, "amy_year": amy_year,
+        "ssp": ssp, "year": year, "percentile": percentile, "uhi": uhi,
+        "events": events, "event_duration": event_duration,
+        "intensity": intensity, "intensity_auto": intensity_auto, "stress_test": stress_test,
+        "smoke": smoke, "smoke_intensity": smoke_intensity, "smoke_duration": smoke_duration,
+        "tmy_period": tmy_period,
+    }, format)
+    if format == "epw" and include_ddy:
+        params["include_ddy"] = "true"
+
+    endpoint = "/api/design-day" if format == "ddy" else "/api/epwforge"
+    data = await client.get_json(endpoint, params)
+    b64_key = "ddy_base64" if format == "ddy" else "epw_base64"
+    out = _handle_file_response(data, b64_key, save_to)
+    out["weather_basis"] = _weather_basis_synthesized(basis, amy_year, tmy_period)
+    out["mode"] = "single"
+    out["meta"] = _meta("generate_weather_file", mode="single", format=format)
+    return out
 
 
-# ── Helpers ────────────────────────────────────────────────────────────
+# ============================================================================
+# Helpers
+# ============================================================================
+
 def _meta(tool: str, **extra: Any) -> dict[str, Any]:
     return {
         "tool": tool,
@@ -974,17 +595,12 @@ def _summarize_epw(epw: EPWFile, *, source_url: str) -> dict[str, Any]:
     db_c = h.dry_bulb_c
     db_f = [c_to_f(c) for c in db_c]
 
-    # Daily mean DB in °F for peak-day + degree-day calcs.
     daily_mean_f = daily_means_by_date(db_f, h.month, h.day)
     peak_cooling_key = max(daily_mean_f, key=daily_mean_f.get)
     peak_heating_key = min(daily_mean_f, key=daily_mean_f.get)
-
     hdd_65 = sum(max(0.0, 65.0 - dm) for dm in daily_mean_f.values())
     cdd_65 = sum(max(0.0, dm - 65.0) for dm in daily_mean_f.values())
-
-    # GHI in kWh/m² (sum hourly Wh/m² → divide by 1000).
     ghi_total_kwh = sum(h.ghi_wh_m2) / 1000.0
-
     monthly_f = monthly_means(db_f, h.month)
 
     return {
@@ -1000,17 +616,18 @@ def _summarize_epw(epw: EPWFile, *, source_url: str) -> dict[str, Any]:
         "ghi_total_annual_kwh_per_m2": round(ghi_total_kwh, 0),
         "monthly_mean_temp_F": [round(v, 1) for v in monthly_f],
         "n_hours": len(db_c),
-        "meta": _meta("analyze_epw"),
+        "meta": _meta("analyze_weather"),
     }
 
 
-def _build_epwforge_params(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Translate a compare_scenarios config dict into /api/epwforge params.
+def _build_params(cfg: dict[str, Any], format: str = "epw") -> dict[str, Any]:
+    """Build query params for /api/epwforge or /api/design-day from a config dict.
 
-    Mirrors generate_weather_file's param shape. format=json is forced so
-    we get back epw_base64 (we need the raw EPW to compute design conds).
+    Accepts both the rich top-level argument set and a minimal `{lat, lon}`-style
+    batch config. format=json is forced so we get JSON with base64 back.
     """
-    params: dict[str, Any] = {
+    smoke_flag = cfg.get("smoke")
+    return {
         "lat": cfg["lat"],
         "lon": cfg["lon"],
         "basis": cfg.get("basis", "tmy"),
@@ -1023,96 +640,128 @@ def _build_epwforge_params(cfg: dict[str, Any]) -> dict[str, Any]:
         "event_duration": cfg.get("event_duration", 14),
         "intensity": cfg.get("intensity"),
         "intensity_auto": str(cfg.get("intensity_auto", True)).lower(),
-        "smoke": str(cfg.get("smoke", False)).lower() if cfg.get("smoke") else None,
+        "stress_test": "true" if cfg.get("stress_test") else None,
+        "smoke": "true" if smoke_flag else None,
         "smoke_intensity": cfg.get("smoke_intensity"),
         "smoke_duration": cfg.get("smoke_duration"),
         "tmy_period": cfg.get("tmy_period", DEFAULT_TMY_PERIOD),
         "format": "json",
     }
-    return params
 
 
 def _weather_basis_synthesized(basis: str, amy_year: int | None, tmy_period: str) -> dict[str, Any]:
-    """Build the `weather_basis` block for synthesized-weather tool responses.
-
-    The block exists to give the agent enough structured context to volunteer
-    "I generated this using vintage X" to the user without it having to chase
-    metadata buried in EPW headers.
-    """
     if basis == "amy":
         return {
             "type": "synthesized_amy",
             "vintage": f"AMY {amy_year}" if amy_year else "AMY (current year)",
             "source": "ECMWF ERA5 reanalysis (single year)",
-            "note": (
-                "Actual Meteorological Year — historical hourly weather, useful for "
-                "hindcasting and calibration. Not a typical year. For typical-year "
-                "use, leave basis=tmy."
-            ),
         }
     return {
         "type": "synthesized_tmyx",
         "vintage": tmy_period,
         "source": "ECMWF ERA5 reanalysis via GuzzWeather (Finkelstein-Schafer)",
-        "note": (
-            f"Synthesized custom TMYx for the {tmy_period} window. For the published "
-            "OneBuilding TMYx of a named station (industry-standard for compliance / "
-            "comparison), use find_station + get_station_epw."
-        ),
     }
 
 
-def _infer_vintage_from_url(url: str) -> str:
-    """Best-effort extract the vintage label from a OneBuilding URL.
-
-    OneBuilding filenames include the source label (e.g., 'TMYx.2007-2021',
-    'IWEC2', 'TMY3'). We grep for these patterns and fall back to 'unknown'.
-    """
-    name = url.rsplit("/", 1)[-1].lower()
-    for tag in ("tmyx.2007-2021", "tmyx.2009-2023", "tmyx.2011-2025", "iwec2", "tmy3", "tmyx"):
-        if tag in name:
-            return tag.upper().replace(".", " ")
-    return "unknown"
-
-
-def _decode_epw_b64(data: dict[str, Any], key: str) -> str:
-    """Extract base64 EPW from an /api/epwforge JSON response and return text."""
-    b64 = data.get(key)
-    if not b64:
-        raise EPWForgeError(
-            502,
-            f"EPWForge response missing {key} — cannot compute design conditions",
-        )
-    return base64.b64decode(b64).decode("utf-8", errors="replace")
-
-
-def _handle_file_response(
-    data: dict[str, Any],
-    b64_key: str,
-    save_to: str | None,
-) -> dict[str, Any]:
+def _handle_file_response(data: dict[str, Any], b64_key: str, save_to: str | None) -> dict[str, Any]:
     if save_to is None:
         return data
     b64 = data.get(b64_key)
     if not b64:
         return {**data, "warning": f"Response did not include {b64_key}; cannot save to disk"}
     n = write_epw_base64(b64, save_to)
-    # Strip the base64 payload from the response to avoid context bloat
     out = {k: v for k, v in data.items() if k != b64_key}
     out["saved_to"] = str(save_to)
     out["bytes_written"] = n
     return out
 
 
-def main() -> None:
-    """Entry point — runs the MCP server on stdio."""
+def _chart_result(svg: str, chart_type: str, source: str, save_to: str | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Wrap an SVG into the standard chart_weather response, optionally saving to disk."""
+    if save_to:
+        return _save_svg(svg, chart_type, source, save_to, extra)
+    body = {"svg": svg, "format": "svg", "chart_type": chart_type, "source": source, "meta": _meta("chart_weather", chart_type=chart_type)}
+    if extra:
+        body.update(extra)
+    return body
+
+
+def _save_svg(svg: str, chart_type: str, source: str, save_to: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    path = Path(save_to).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(svg, encoding="utf-8")
+    body = {
+        "saved_to": str(path),
+        "bytes_written": len(svg.encode("utf-8")),
+        "format": "svg",
+        "chart_type": chart_type,
+        "source": source,
+        "meta": _meta("chart_weather", chart_type=chart_type, saved=True),
+    }
+    if extra:
+        body.update(extra)
+    return body
+
+
+async def _call_hosted_mcp(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Forward a tool call to the hosted MCP endpoint at /api/mcp.
+
+    Used by analyze_weather + chart_weather when they're called with a `config`
+    argument — the pipeline must run on EPWForge infra. No auth header is sent
+    (read tools are anon-OK at the hosted endpoint). If the user has set
+    EPWFORGE_API_KEY we still don't pass it for read tools — hosted MCP doesn't
+    charge credits for analyze/chart regardless.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": args},
+    }
+    async with httpx.AsyncClient(
+        timeout=120.0,
+        headers={"User-Agent": "epwforge-mcp"},
+    ) as c:
+        resp = await c.post(f"{_base_url()}/api/mcp", json=payload)
+        if resp.status_code >= 400:
+            raise EPWForgeError(resp.status_code, f"Hosted MCP returned {resp.status_code}: {resp.text[:300]}")
+        body = resp.json()
+    if body.get("error"):
+        err = body["error"]
+        raise EPWForgeError(500, err.get("message", "Hosted MCP error"))
+    result = body.get("result", {})
+    if result.get("isError"):
+        msg = result.get("content", [{}])[0].get("text", "Unknown tool error")
+        raise EPWForgeError(500, msg)
+    # MCP wraps the result as {content: [{type: "text", text: "<json>"}]}
+    text = result.get("content", [{}])[0].get("text", "{}")
     try:
-        # Validate the API key up front so users get a clear error before any tool call.
-        # The client constructor raises with a helpful message when EPWFORGE_API_KEY is missing.
-        EPWForgeClient()
-    except RuntimeError as e:
-        print(f"epwforge-mcp: {e}", file=sys.stderr)
-        sys.exit(1)
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Hosted tool returned non-JSON text — pass it through as a message field.
+        return {"message": text}
+
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+def main() -> None:
+    """Entry point — runs the MCP server on stdio.
+
+    No longer requires EPWFORGE_API_KEY upfront. The 3 read tools work
+    without a key; only generate_weather_file checks for one (and raises
+    a clear error if missing).
+    """
+    if os.environ.get("EPWFORGE_API_KEY"):
+        print(f"epwforge-mcp v{__version__}: API key detected — all 4 tools available", file=sys.stderr)
+    else:
+        print(
+            f"epwforge-mcp v{__version__}: no EPWFORGE_API_KEY set — "
+            "read tools (find_station, analyze_weather, chart_weather) work without auth. "
+            "Set EPWFORGE_API_KEY (free at https://epwforge.com/account) to enable generate_weather_file.",
+            file=sys.stderr,
+        )
     mcp.run()
 
 

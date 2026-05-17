@@ -105,21 +105,52 @@ async def find_station(
         int,
         Field(ge=1, le=50, description="Max stations to return (default 10)."),
     ] = 10,
+    include_amy_extremes: Annotated[
+        bool,
+        Field(description="When True with lat+lon, also returns the hottest/coldest/most-humid years on record (per ERA5). Routes through hosted MCP."),
+    ] = False,
+    include_climate_deltas: Annotated[
+        bool,
+        Field(description="When True with lat+lon+ssp+year, also returns the monthly CMIP6 delta-T. Routes through hosted MCP."),
+    ] = False,
+    ssp: Annotated[
+        Literal["ssp126", "ssp245", "ssp370", "ssp585"] | None,
+        Field(description="SSP scenario (only used with include_climate_deltas)"),
+    ] = None,
+    year: Annotated[
+        Literal[2030, 2050, 2070, 2090] | None,
+        Field(description="Future horizon (only used with include_climate_deltas)"),
+    ] = None,
+    percentile: Annotated[
+        Literal[5, 10, 25, 50, 75, 90, 95],
+        Field(description="Warming percentile (only used with include_climate_deltas, default 50)"),
+    ] = 50,
 ) -> dict[str, Any]:
     """Search the GuzzStations catalog (17,000+ weather stations worldwide).
 
-    GuzzStations is EPWForge's self-hosted mirror of the OneBuilding TMY
-    catalog — named airports / WMO stations across every country. Each
-    result includes a ready-to-use `epw_url` you can pass directly to
-    `analyze_weather` or `chart_weather`.
+    Optional enrichments (route through hosted MCP for the extra queries):
+      - include_amy_extremes: hottest/coldest/most-humid years on record
+      - include_climate_deltas: monthly CMIP6 delta-T for the picked scenario
 
-    No authentication required.
+    No authentication required for any mode.
 
     Examples:
       find_station(query="Denver")
       find_station(lat=40.7, lon=-74.0, max_results=5)
       find_station(country="JPN", query="Tokyo")
+      find_station(lat=40.7, lon=-74.0, include_amy_extremes=True)
+      find_station(lat=40.7, lon=-74.0, include_climate_deltas=True, ssp="ssp245", year=2050)
     """
+    # If any enrichment is requested, the hosted MCP handles the fan-out to
+    # /api/amy-extremes and /api/climate-deltas (single round-trip vs 3).
+    if include_amy_extremes or include_climate_deltas:
+        return await _call_hosted_mcp("find_station", {
+            "query": query, "lat": lat, "lon": lon, "country": country, "max_results": max_results,
+            "include_amy_extremes": include_amy_extremes,
+            "include_climate_deltas": include_climate_deltas,
+            "ssp": ssp, "year": year, "percentile": percentile,
+        })
+
     params: dict[str, Any] = {"limit": max_results}
     if query: params["q"] = query
     if lat is not None: params["lat"] = lat
@@ -206,6 +237,18 @@ async def analyze_weather(
             )
         ),
     ] = None,
+    include_full_ashrae: Annotated[
+        bool,
+        Field(description="Adds ASHRAE 0.4%/1%/2% cooling DB + 99.6%/99% heating DB design conditions. Routes through hosted MCP."),
+    ] = False,
+    include_improbability: Annotated[
+        bool,
+        Field(description="Adds EPWForge's stress-test improbability score (config mode only). Routes through hosted MCP."),
+    ] = False,
+    include_idf: Annotated[
+        bool,
+        Field(description="Adds ready-to-paste EnergyPlus SizingPeriod:DesignDay IDF objects to the response. Routes through hosted MCP."),
+    ] = False,
 ) -> dict[str, Any]:
     """Compute design conditions, HDD/CDD, monthly stats, and peak days for one
     or more EPW files. No EPW content returned — stats only.
@@ -227,6 +270,19 @@ async def analyze_weather(
     inputs_set = [x for x in (url, urls, config) if x is not None]
     if len(inputs_set) != 1:
         raise ValueError("analyze_weather requires exactly one of: url, urls, config")
+
+    # If any enrichment is requested, route through hosted MCP (it has the
+    # IDF emitter, full-ASHRAE computation, and improbability scorer in lib).
+    if include_full_ashrae or include_improbability or include_idf:
+        payload: dict[str, Any] = {
+            "include_full_ashrae": include_full_ashrae,
+            "include_improbability": include_improbability,
+            "include_idf": include_idf,
+        }
+        if url: payload["url"] = url
+        if urls: payload["urls"] = urls
+        if config: payload["config"] = config
+        return await _call_hosted_mcp("analyze_weather", payload)
 
     # Single URL — local fetch + parse.
     if url:
@@ -290,8 +346,15 @@ async def chart_weather(
         ),
     ] = None,
     chart_type: Annotated[
-        Literal["diurnal", "comparison"],
-        Field(description="diurnal = monthly Max/Avg/Min hourly profile. comparison = design-condition delta bars (needs urls)."),
+        Literal["diurnal", "temp_carpet", "wind_rose", "monthly_boxplot", "comparison"],
+        Field(description=(
+            "Chart type. diurnal = monthly Max/Avg/Min hourly profile. "
+            "temp_carpet = 8760-cell heatmap of hour x day-of-year. "
+            "wind_rose = polar bars of direction x speed. "
+            "monthly_boxplot = Q1/median/Q3 + whiskers per month. "
+            "comparison = design-condition delta bars (needs urls). "
+            "diurnal and comparison run locally; the 3 new types route through hosted MCP."
+        )),
     ] = "diurnal",
     save_to: Annotated[
         str | None,
@@ -312,6 +375,17 @@ async def chart_weather(
     inputs_set = [x for x in (url, urls, config) if x is not None]
     if len(inputs_set) != 1:
         raise ValueError("chart_weather requires exactly one of: url, urls, config")
+
+    # New chart types (added in 0.3.0) live only in the hosted MCP; route there.
+    if chart_type in ("temp_carpet", "wind_rose", "monthly_boxplot"):
+        payload: dict[str, Any] = {"chart_type": chart_type}
+        if url: payload["url"] = url
+        if urls: payload["urls"] = urls
+        if config: payload["config"] = config
+        result = await _call_hosted_mcp("chart_weather", payload)
+        if save_to and result.get("svg"):
+            return _save_svg(result["svg"], chart_type, result.get("source", "synthesized"), save_to)
+        return result
 
     # Diurnal — needs a single EPW.
     if chart_type == "diurnal":

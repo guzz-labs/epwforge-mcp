@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>EPWForge — Site Comparison</title>
+<style>
+  /* ─── Theme tokens (light defaults, dark overrides below) ─── */
+  :root {
+    --brand-orange: #c2854a;
+    --heat: #e64a4a;
+    --cool: #3a7fbf;
+
+    --bg: #ffffff;
+    --card-bg: #f3f4f6;            /* light mode: light grey card on white page */
+    --card-border: var(--brand-orange);
+    --text: #1f2937;
+    --text-muted: #6b7280;
+    --divider: #e5e7eb;
+
+    --chip-good-bg: #d1fae5;   --chip-good-fg: #065f46;
+    --chip-mid-bg: #fef3c7;    --chip-mid-fg: #92400e;
+    --chip-poor-bg: #fee2e2;   --chip-poor-fg: #991b1b;
+    --chip-strong-bg: #cffafe; --chip-strong-fg: #155e75;
+
+    --chip-neutral-bg: #f3f4f6; --chip-neutral-fg: #374151;
+    --chip-warn-bg: #ffedd5;    --chip-warn-fg: #9a3412;
+
+    --btn-bg: #ffffff;
+    --btn-border: #d1d5db;
+    --btn-fg: #1f2937;
+    --btn-hover-bg: #f9fafb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171717;               /* neutral dark, no blue */
+      --card-bg: #262626;          /* neutral-800, true grey */
+      --card-border: var(--brand-orange);
+      --text: #f5f5f5;
+      --text-muted: #a3a3a3;
+      --divider: #404040;
+
+      --chip-good-bg: #064e3b;   --chip-good-fg: #6ee7b7;
+      --chip-mid-bg: #78350f;    --chip-mid-fg: #fcd34d;
+      --chip-poor-bg: #7f1d1d;   --chip-poor-fg: #fca5a5;
+      --chip-strong-bg: #164e63; --chip-strong-fg: #67e8f9;
+
+      --chip-neutral-bg: #334155; --chip-neutral-fg: #cbd5e1;
+      --chip-warn-bg: #7c2d12;    --chip-warn-fg: #fdba74;
+
+      --btn-bg: #1e293b;
+      --btn-border: #475569;
+      --btn-fg: #f1f5f9;
+      --btn-hover-bg: #334155;
+    }
+  }
+
+  /* ─── Layout ─── */
+  /* `height: max-content` on html collapses the body to actual content height,
+     killing the spurious blank space the host iframe was reserving. */
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--text);
+    height: max-content;
+    min-height: 0;
+  }
+  body {
+    font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    line-height: 1.4;
+    padding: 12px;
+    box-sizing: border-box;
+  }
+  .brand-stripe {
+    height: 3px;
+    background: var(--brand-orange);
+    border-radius: 2px;
+    margin-bottom: 12px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1.5px solid var(--card-border);
+    border-radius: 10px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ─── Card header ─── */
+  .card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .city {
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--text);
+  }
+  .city-icon {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    margin-right: 6px;
+    vertical-align: -2px;
+    opacity: 0.6;
+  }
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+
+  /* ─── Chips ─── */
+  .chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .chip-good    { background: var(--chip-good-bg);    color: var(--chip-good-fg); }
+  .chip-mid     { background: var(--chip-mid-bg);     color: var(--chip-mid-fg); }
+  .chip-poor    { background: var(--chip-poor-bg);    color: var(--chip-poor-fg); }
+  .chip-strong  { background: var(--chip-strong-bg);  color: var(--chip-strong-fg); }
+  .chip-neutral { background: var(--chip-neutral-bg); color: var(--chip-neutral-fg); }
+  .chip-warn    { background: var(--chip-warn-bg);    color: var(--chip-warn-fg); }
+
+  .caveat {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-top: 4px;
+    margin-bottom: 8px;
+  }
+
+  /* ─── Metric rows ─── */
+  .metrics {
+    border-top: 1px solid var(--divider);
+    padding-top: 10px;
+    margin-bottom: 12px;
+  }
+  .metric-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    font-size: 13px;
+  }
+  .metric-label {
+    color: var(--text-muted);
+  }
+  .metric-value {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .metric-note {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-left: 4px;
+  }
+
+  /* ─── Hazards row ─── */
+  .hazards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+  .hazard {
+    background: var(--chip-neutral-bg);
+    color: var(--chip-neutral-fg);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 6px;
+  }
+
+  /* ─── Action button ─── */
+  .stress-btn {
+    margin-top: auto;
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+    border: 1px solid var(--btn-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: background 100ms ease;
+  }
+  .stress-btn:hover:not(:disabled) {
+    background: var(--btn-hover-bg);
+  }
+  .stress-btn:disabled {
+    opacity: 0.5;
+    cursor: wait;
+  }
+  .stress-btn .arrow {
+    color: var(--brand-orange);
+    font-size: 12px;
+  }
+  .stress-btn.is-loading::after {
+    content: "";
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--text-muted);
+    border-top-color: var(--brand-orange);
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ─── Footer ─── */
+  .footer {
+    margin-top: 16px;
+    text-align: right;
+    font-size: 10px;
+    color: var(--text-muted);
+    letter-spacing: 0.04em;
+  }
+  .footer a { color: var(--brand-orange); text-decoration: none; }
+
+  /* ─── Empty / loading state ─── */
+  .empty {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  /* ─── Result inline panel (after stress-test click) ─── */
+  .stress-result {
+    margin-top: 8px;
+    padding: 10px;
+    background: var(--divider);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .stress-result.is-error {
+    background: var(--chip-poor-bg);
+    color: var(--chip-poor-fg);
+  }
+</style>
+</head>
+<body>
+  <div class="brand-stripe"></div>
+  <div id="diag" style="font-size:11px;color:#a3a3a3;margin-bottom:8px;font-family:monospace;">
+    build P · clicks: <span id="click-count">0</span> · btn-clicks: <span id="btn-click-count">0</span> · last: <span id="last-action">—</span> · app: <span id="app-state">init…</span>
+  </div>
+  <div id="cards" class="grid"></div>
+  <div class="footer">EPWForge.com &nbsp;↗ &nbsp;<span style="opacity:0.4">build P</span></div>
+
+<script type="module">
+  // ─── Diagnostic counters ──────────────────────────────────────────────────
+  let clickCount = 0;
+  let btnClickCount = 0;
+  document.addEventListener("click", (e) => {
+    clickCount += 1;
+    const ce = document.getElementById("click-count");
+    if (ce) ce.textContent = String(clickCount);
+
+    // Programmatic event delegation — CSP-safe (no inline onclick).
+    // Find a stress-test button in the click target's ancestor chain.
+    const btn = e.target.closest && e.target.closest("[data-action=stress-test]");
+    if (btn) {
+      btnClickCount += 1;
+      const bce = document.getElementById("btn-click-count");
+      if (bce) bce.textContent = String(btnClickCount);
+
+      const idx = Number(btn.dataset.idx);
+      const la = document.getElementById("last-action");
+      if (la) la.textContent = `stress-test(idx=${idx})`;
+
+      // Defer so this listener returns before the async handler kicks off —
+      // keeps diag updates visible even if the handler throws.
+      setTimeout(() => stressTest(idx), 0);
+    }
+  }, true /* capture phase */);
+
+  // ─── MCP Apps client (loaded from unpkg; CSP allowlist set on the resource) ──
+  // Failure to import (e.g. plain-browser preview) falls back to the fixture.
+  let App = null;
+  try {
+    ({ App } = await import("https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with-deps"));
+    setAppState("loaded");
+  } catch (err) {
+    console.warn("[epwforge] MCP Apps client unavailable — running in fixture-preview mode.", err);
+    setAppState("import-failed");
+  }
+  function setAppState(s) {
+    const el = document.getElementById("app-state");
+    if (el) el.textContent = s;
+  }
+
+  // ─── Fixture data (used in fixture-preview mode and as a design reference) ──
+  const FIXTURE = {
+    sites: [
+      {
+        city: "St. Louis", state: "MO",
+        subtitle: "Moderate fit",
+        fit: { label: "Mid", tone: "mid" },
+        metrics: [
+          { label: "Cooling design", value: "92.8 → 97.7 °F" },
+          { label: "Free-cooling hrs", chip: { label: "Moderate", tone: "warn" } },
+          { label: "Evaporative",     chip: { label: "Shoulder only", tone: "warn" } },
+          { label: "Latent burden",   chip: { label: "High", tone: "poor" } },
+          { label: "CDD → 2050",      value: "+46%" },
+          { label: "Solar (GHI)",     value: "1,590 kWh/m²" },
+        ],
+        hazards: ["Tornado / derecho", "Ice storm", "River flood"],
+      },
+      {
+        city: "Boston", state: "MA",
+        subtitle: "Strong cooling climate",
+        fit: { label: "Good", tone: "good" },
+        metrics: [
+          { label: "Cooling design", value: "86.0 → 89.8 °F" },
+          { label: "Free-cooling hrs", chip: { label: "High", tone: "good" } },
+          { label: "Evaporative",     chip: { label: "Moderate", tone: "warn" } },
+          { label: "Latent burden",   chip: { label: "Mod-high", tone: "warn" } },
+          { label: "CDD → 2050",      value: "+69%", note: "(lowest base)" },
+          { label: "Solar (GHI)",     value: "1,441 kWh/m²" },
+        ],
+        hazards: ["Nor'easter", "Coastal surge / SLR", "Snow / ice load"],
+      },
+      {
+        city: "Miami", state: "FL",
+        subtitle: "Weak climate / latency-only",
+        fit: { label: "Poor", tone: "poor" },
+        metrics: [
+          { label: "Cooling design", value: "91.6 → 94.5 °F" },
+          { label: "Free-cooling hrs", chip: { label: "Negligible", tone: "poor" } },
+          { label: "Evaporative",     chip: { label: "Ineffective", tone: "poor" } },
+          { label: "Latent burden",   chip: { label: "Extreme", tone: "poor" } },
+          { label: "CDD → 2050",      value: "+20%", note: "(highest base)" },
+          { label: "Solar (GHI)",     value: "1,830 kWh/m²" },
+        ],
+        hazards: ["Hurricane wind", "Storm surge", "Sea-level rise"],
+      },
+      {
+        city: "Denver", state: "CO",
+        subtitle: "Best efficiency climate",
+        fit: { label: "Strong*", tone: "strong" },
+        caveat: "Lowest PUE potential — *hazard caveats",
+        metrics: [
+          { label: "Cooling design", value: "94.5 → 99.0 °F" },
+          { label: "Free-cooling hrs", chip: { label: "Very high", tone: "good" } },
+          { label: "Evaporative",     chip: { label: "Excellent", tone: "good" } },
+          { label: "Latent burden",   chip: { label: "Negligible", tone: "good" } },
+          { label: "CDD → 2050",      value: "+61%" },
+          { label: "Solar (GHI)",     value: "1,881 kWh/m²", note: "(best)" },
+        ],
+        hazards: ["Severe hail", "Wildfire smoke", "Water scarcity", "Altitude derate"],
+      },
+    ],
+  };
+
+  // ─── Render ─────────────────────────────────────────────────────────────
+  function chipHTML(c) {
+    return `<span class="chip chip-${c.tone}">${escapeHtml(c.label)}</span>`;
+  }
+  function metricRow(m) {
+    const right = m.chip
+      ? chipHTML(m.chip)
+      : `<span class="metric-value">${escapeHtml(m.value)}${m.note ? ` <span class="metric-note">${escapeHtml(m.note)}</span>` : ""}</span>`;
+    return `<div class="metric-row"><span class="metric-label">${escapeHtml(m.label)}</span>${right}</div>`;
+  }
+  function cardHTML(site, idx) {
+    return `
+      <div class="card" data-idx="${idx}">
+        <div class="card-header">
+          <div class="city">${escapeHtml(site.city)}, ${escapeHtml(site.state)}</div>
+          ${chipHTML(site.fit)}
+        </div>
+        <div class="subtitle">${escapeHtml(site.subtitle)}</div>
+        ${site.caveat ? `<div class="caveat">${escapeHtml(site.caveat)}</div>` : ""}
+        <div class="metrics">
+          ${site.metrics.map(metricRow).join("")}
+        </div>
+        <div class="hazards">
+          ${site.hazards.map(h => `<span class="hazard">${escapeHtml(h)}</span>`).join("")}
+        </div>
+        <button class="stress-btn" data-action="stress-test" data-idx="${idx}">
+          Stress-test ${escapeHtml(site.city)} <span class="arrow">↗</span>
+        </button>
+      </div>
+    `;
+  }
+  function render(data) {
+    const grid = document.getElementById("cards");
+    const noticeId = "single-site-notice";
+    document.getElementById(noticeId)?.remove();
+    if (!data?.sites?.length) {
+      grid.innerHTML = `<div class="empty">No site data yet — call <code>analyze_weather</code> with multiple URLs.</div>`;
+    } else {
+      grid.innerHTML = data.sites.map(cardHTML).join("");
+      if (data.notice) {
+        const banner = document.createElement("div");
+        banner.id = noticeId;
+        banner.className = "empty";
+        banner.style.cssText = "margin-top:12px;padding:8px 12px;font-size:11px;text-align:left;background:var(--divider);border-radius:6px;";
+        banner.textContent = data.notice;
+        grid.after(banner);
+      }
+    }
+    // Auto-resize fires from a ResizeObserver, but on first render the iframe
+    // is sized by the host BEFORE our cards are in the DOM — so we nudge it
+    // several times as layout settles. This mostly kills the trailing gap
+    // some users see after the initial render.
+    if (app?.sendSizeChanged) {
+      const tellHostMyHeight = () => {
+        try {
+          const rect = document.documentElement.getBoundingClientRect();
+          app.sendSizeChanged({ width: Math.ceil(rect.width), height: Math.ceil(rect.height) });
+        } catch (_) { /* host may not support it */ }
+      };
+      requestAnimationFrame(tellHostMyHeight);
+      setTimeout(tellHostMyHeight, 100);
+      setTimeout(tellHostMyHeight, 400);
+    }
+  }
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+
+  // ─── Derive card data from analyze_weather tool response ─────────────────
+  // Input: parsed JSON from analyze_weather (multi-URL mode → has `summaries[]`,
+  // single-URL / config mode → has top-level cooling_design_db_F etc.).
+  // Output: { sites: [...], notice?: string } in the shape `render()` expects.
+  //
+  // For v0.5.0 we render the metrics we genuinely have. Hazards / evaporative
+  // burden / latent burden / future-delta enrichment are deferred until the
+  // server returns them — at which point the UI auto-uses them without code
+  // changes (see the `site.metrics_override` / `site.hazards_override` checks).
+  function deriveFromAnalyzeWeather(parsed) {
+    if (!parsed || typeof parsed !== "object") return null;
+    const summaries = parsed.summaries;
+    if (Array.isArray(summaries) && summaries.length > 0) {
+      return { sites: summaries.map(s => deriveSite(s)) };
+    }
+    // Single-summary response (single URL or config mode). Wrap as one card
+    // so the user sees the data + a notice explaining the card UI is built
+    // for multi-site comparison.
+    if (typeof parsed.cooling_design_db_F === "number") {
+      return {
+        sites: [deriveSite(parsed)],
+        notice: "Single-site result. For side-by-side comparison, pass urls=[…] (≥2 EPWs) in one analyze_weather call.",
+      };
+    }
+    return null;
+  }
+  function deriveSite(s) {
+    const loc = s.location || {};
+    const city = cleanStationName(loc.city || "Unknown");
+    const state = loc.state || loc.country || "";
+    const cool = s.cooling_design_db_F;
+    const heat = s.heating_design_db_F;
+    const cdd = s.cdd_65_annual;
+    const ghiKwh = s.ghi_total_annual_kwh_per_m2;
+    // Imperial: 1 kWh/m² = 0.31707 kBtu/ft²  (per ASHRAE Fundamentals)
+    const ghiKbtu = typeof ghiKwh === "number" ? ghiKwh * 0.31707 : undefined;
+
+    // Server may have computed a future-climate projection per site
+    // (when include_future_projection=true). When present, render
+    // each metric as "baseline → future" inline.
+    const fp = s.future_projection;
+    const futCool = fp?.cooling_design_db_F;
+    const futHeat = fp?.heating_design_db_F;
+    const cddPct  = fp?.cdd_pct_delta;
+    const futYear = fp?.year;
+    const futSsp  = fp?.ssp;
+
+    // For single-site morphed/stress results: the server attached a baseline
+    // reference (same lat/lon, unmodified TMYx) so we can render
+    // "baseline → stressed" deltas. Without this, individual stress cards
+    // are numbers in a vacuum.
+    const br = s.baseline_reference;
+    const baseCool = br?.cooling_design_db_F;
+    const baseHeat = br?.heating_design_db_F;
+    const baseCdd  = br?.cdd_65_annual;
+    const baseAnn  = br?.annual_mean_temp_F;
+    const cddDeltaPct = (typeof baseCdd === "number" && baseCdd > 0 && typeof cdd === "number")
+      ? Math.round((cdd - baseCdd) / baseCdd * 100)
+      : undefined;
+
+    const fit = fitRating(cool, cdd);
+    const subtitle = climateSubtitle(cool, cdd);
+    const freeCooling = freeCoolingChip(cdd);
+
+    // Format precedence per metric:
+    //   1. baseline_reference present → "baseline → this" (single-site morphed/stress)
+    //   2. future_projection present → "this → future"     (multi-URL with future)
+    //   3. neither → just the current value
+    function delta(base, cur, unit = "°F", digits = 1) {
+      if (typeof base === "number" && typeof cur === "number") {
+        return `${fmt(base, digits)} → ${fmt(cur, digits)} ${unit}`;
+      }
+      if (typeof cur === "number") return `${fmt(cur, digits)} ${unit}`;
+      return "—";
+    }
+
+    const metrics = s.metrics_override ?? [
+      {
+        label: "Cooling design (99%)",
+        value: typeof baseCool === "number"
+          ? delta(baseCool, cool)
+          : (typeof futCool === "number" ? `${fmt(cool, 1)} → ${fmt(futCool, 1)} °F` : `${fmt(cool, 1)} °F`),
+      },
+      {
+        label: "Heating design (1%)",
+        value: typeof baseHeat === "number"
+          ? delta(baseHeat, heat)
+          : (typeof futHeat === "number" ? `${fmt(heat, 1)} → ${fmt(futHeat, 1)} °F` : `${fmt(heat, 1)} °F`),
+      },
+      {
+        label: "Annual mean",
+        value: typeof baseAnn === "number"
+          ? delta(baseAnn, s.annual_mean_temp_F)
+          : `${fmt(s.annual_mean_temp_F, 1)} °F`,
+      },
+      { label: "Free-cooling potential", chip: freeCooling },
+      typeof cddDeltaPct === "number"
+        ? { label: "CDD-65 vs baseline", value: `${cddDeltaPct >= 0 ? "+" : ""}${cddDeltaPct}%` }
+        : (typeof cddPct === "number" && futYear
+            ? { label: `CDD-65 → ${futYear}`, value: `${cddPct >= 0 ? "+" : ""}${cddPct}%` }
+            : { label: "CDD-65 (annual)",     value: fmtInt(cdd) }),
+      { label: "Solar GHI",              value: `${fmtInt(ghiKbtu)} kBtu/ft²` },
+    ];
+
+    return {
+      city, state,
+      subtitle,
+      fit,
+      caveat: br
+        ? (br.source_label
+            ? `${br.source_label} → this morphed scenario (full event pipeline)`
+            : "Real OneBuilding TMYx → this morphed scenario (full event pipeline)")
+        : (fp && futSsp
+            ? `${futSsp.toUpperCase()} ${futYear}${fp.percentile ? ` · P${fp.percentile}` : ""} · standard morphing (Belcher-class mean shift). Also evaluate compounded extreme events (stress-test) for cold-tail design basis.`
+            : undefined),
+      lat: loc.lat,
+      lon: loc.lon,
+      source_url: s.source_url,
+      metrics,
+      hazards: s.hazards_override ?? [],
+    };
+  }
+  // Strip common station suffixes ("Boston-Logan.Intl.AP" → "Boston-Logan").
+  // Keeps the card heading readable; full station name still visible on hover.
+  function cleanStationName(s) {
+    if (!s) return "Unknown";
+    return s
+      .replace(/\.(Intl\.AP|Intl\.AF|Natl\.AP|Natl\.AF|Natl\.|Intl\.|AP|AF|Muni|Mun|Field|Fld|Rgnl|Reg)$/i, "")
+      .replace(/\.+$/, "")
+      .trim();
+  }
+  function fmt(v, d=1) { return typeof v === "number" ? v.toFixed(d) : "—"; }
+  function fmtInt(v) { return typeof v === "number" ? Math.round(v).toLocaleString() : "—"; }
+  function fitRating(coolF, cdd) {
+    if (typeof coolF !== "number") return { label: "—", tone: "neutral" };
+    if (coolF < 85)  return { label: "Strong", tone: "strong" };
+    if (coolF < 92)  return { label: "Good",   tone: "good" };
+    if (coolF < 97)  return { label: "Mid",    tone: "mid" };
+    return { label: "Poor", tone: "poor" };
+  }
+  function climateSubtitle(coolF, cdd) {
+    if (typeof coolF !== "number") return "Climate stats unavailable";
+    if (coolF < 85)  return "Cool climate — favorable for free cooling";
+    if (coolF < 92)  return "Moderate climate";
+    if (coolF < 97)  return "Warm climate";
+    return "Hot climate — high cooling demand";
+  }
+  function freeCoolingChip(cdd) {
+    if (typeof cdd !== "number") return { label: "—", tone: "neutral" };
+    if (cdd < 500)   return { label: "Very high", tone: "good" };
+    if (cdd < 1500)  return { label: "High",      tone: "good" };
+    if (cdd < 3000)  return { label: "Moderate",  tone: "warn" };
+    return { label: "Negligible", tone: "poor" };
+  }
+
+  // ─── App SDK setup (live mode) ────────────────────────────────────────────
+  let app = null;
+  let currentSites = [];          // last rendered site array (for stress-test lookup)
+
+  if (App) {
+    app = new App({ name: "EPWForge Compare Sites", version: "0.5.0" });
+
+    app.ontoolresult = ({ content }) => {
+      try {
+        const textBlock = (content || []).find(c => c.type === "text");
+        if (!textBlock) return;
+        const parsed = JSON.parse(textBlock.text);
+        const data = deriveFromAnalyzeWeather(parsed);
+        if (data) {
+          currentSites = data.sites;
+          render(data);
+        }
+      } catch (err) {
+        console.error("[epwforge] Failed to parse tool result:", err);
+      }
+    };
+
+    app.onhostcontextchanged = (ctx) => {
+      if (ctx?.safeAreaInsets) {
+        const s = document.body.style;
+        s.paddingTop    = `${ctx.safeAreaInsets.top}px`;
+        s.paddingRight  = `${ctx.safeAreaInsets.right}px`;
+        s.paddingBottom = `${ctx.safeAreaInsets.bottom}px`;
+        s.paddingLeft   = `${ctx.safeAreaInsets.left}px`;
+      }
+    };
+
+    try {
+      await app.connect();
+      setAppState("connected");
+    } catch (err) {
+      setAppState(`connect-failed: ${err?.message || err}`);
+      console.error("[epwforge] app.connect failed", err);
+    }
+    const ctx = app.getHostContext();
+    if (ctx) app.onhostcontextchanged(ctx);
+
+    // Belt-and-suspenders resize watcher. The SDK's built-in ResizeObserver
+    // appears to miss some renders (e.g. the SECOND card grid after a new
+    // tool call), so we also observe body size ourselves and forward any
+    // change as an explicit sendSizeChanged. Debounced so we don't flood
+    // the host with messages during layout settle.
+    if (app?.sendSizeChanged) {
+      let debounceTimer = null;
+      let lastH = 0;
+      const ro = new ResizeObserver(() => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          const r = document.documentElement.getBoundingClientRect();
+          const h = Math.ceil(r.height);
+          if (h !== lastH) {
+            lastH = h;
+            try { app.sendSizeChanged({ width: Math.ceil(r.width), height: h }); }
+            catch (_) {}
+          }
+        }, 80);
+      });
+      ro.observe(document.documentElement);
+      ro.observe(document.body);
+    }
+  } else {
+    // Plain-browser preview: render fixture so designers can iterate without MCP host.
+    currentSites = FIXTURE.sites;
+    setAppState("preview-mode");
+    render(FIXTURE);
+  }
+
+  // ─── Stress-test handler ──────────────────────────────────────────────────
+  // Called from the document-level click listener (event delegation).
+  // CSP in the MCP Apps sandbox blocks inline onclick="…" attributes, so
+  // programmatic addEventListener is the only path that survives.
+  async function stressTest(idx) {
+    const btn = document.querySelector(`button.stress-btn[data-idx="${idx}"]`);
+    const site = currentSites[idx];
+    if (!site) {
+      showFloatingError(`No site at index ${idx} (currentSites has ${currentSites.length})`);
+      return;
+    }
+
+    // Brief feedback so the user knows the click was received before the
+    // new conversation turn renders.
+    showResult(idx, "Asking Claude to run the stress test…");
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add("is-loading");
+      btn.querySelector(".arrow")?.remove();
+    }
+
+    if (!app) {
+      showResult(idx,
+        `Preview mode (no MCP host detected):\n` +
+        `Would ask Claude to run analyze_weather on ${site.city}, ${site.state} ` +
+        `(lat=${site.lat}, lon=${site.lon}) with SSP 5-8.5 2050 + heatwave + coldsnap + smoke.`,
+      );
+      resetBtn(btn);
+      return;
+    }
+    if (typeof site.lat !== "number" || typeof site.lon !== "number") {
+      showResult(idx, "Cannot stress-test: site has no lat/lon (was the source URL parseable?).", { error: true });
+      resetBtn(btn);
+      return;
+    }
+
+    // Compose a natural-language prompt that asks Claude to run the stress
+    // test as a fresh conversational turn. The host adds it as a user
+    // message and Claude responds via the normal chat flow — much cleaner
+    // than an inline result panel buried in the card.
+    const promptText =
+      `Run a 2050 SSP 3-7.0 (P75) stress test on ${site.city}, ${site.state} ` +
+      `with a heatwave + cold-snap + wildfire smoke compound event. ` +
+      `Use analyze_weather config mode with:\n` +
+      `  lat: ${site.lat}, lon: ${site.lon}\n` +
+      `  ssp: "ssp370", year: 2050, percentile: 75\n` +
+      `  events: "heatwave,coldsnap"\n` +
+      `  intensity: "heatwave:8,coldsnap:8"\n` +
+      `  event_duration: 21\n` +
+      `  smoke: true, smoke_intensity: 7, smoke_duration: 14\n` +
+      `  stress_test: true\n` +
+      `Include full ASHRAE design conditions and the improbability score.`;
+
+    try {
+      const result = await app.sendMessage({
+        role: "user",
+        content: [{ type: "text", text: promptText }],
+      });
+      if (result?.isError) {
+        showResult(idx, "The host rejected the message — try clicking again or run the stress test in chat.", { error: true });
+      } else {
+        // Message dispatched. The agent's response will appear as a new turn
+        // in the conversation, so clear our inline panel rather than leaving
+        // stale "Running…" text.
+        clearResult(idx);
+      }
+    } catch (err) {
+      console.error("[epwforge] sendMessage failed:", err);
+      showResult(idx, `Failed to send stress-test prompt: ${err?.message || err}`, { error: true });
+    } finally {
+      resetBtn(btn);
+    }
+  }
+  function resetBtn(btn) {
+    if (!btn) return;
+    btn.disabled = false;
+    btn.classList.remove("is-loading");
+  }
+
+  // Surfaces top-level / handler-time errors that wouldn't otherwise reach the user.
+  function showFloatingError(text) {
+    let bar = document.getElementById("floating-error");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "floating-error";
+      bar.style.cssText = "position:sticky;top:0;background:#fee2e2;color:#991b1b;padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;";
+      document.body.insertBefore(bar, document.body.firstChild);
+    }
+    bar.textContent = text;
+  }
+
+  function showResult(idx, text, { error = false } = {}) {
+    const card = document.querySelector(`.card[data-idx="${idx}"]`);
+    if (!card) return;
+    let panel = card.querySelector(".stress-result");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.className = "stress-result";
+      card.appendChild(panel);
+    }
+    panel.textContent = text;
+    panel.classList.toggle("is-error", !!error);
+  }
+  function clearResult(idx) {
+    const card = document.querySelector(`.card[data-idx="${idx}"]`);
+    card?.querySelector(".stress-result")?.remove();
+  }
+</script>
+</body>
+</html>

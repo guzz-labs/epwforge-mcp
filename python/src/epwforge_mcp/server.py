@@ -60,8 +60,80 @@ TmyPeriod = Literal["full", "2011-2025", "2009-2023", "2007-2021", "2004-2018"]
 VALID_EVENTS = ("heatwave", "coldsnap", "hothumid", "coldwindy")
 
 
+# ── MCP Apps (SEP-1865) interactive UI resources ─────────────────────────────
+# Tools that reference a UI resource via their `meta.ui.resourceUri` render
+# the linked HTML inline in supporting hosts (Claude Desktop, ChatGPT, VS
+# Code, Goose). Clients without MCP Apps support fall back to the plain-text
+# tool response — no regression.
+COMPARE_SITES_URI = "ui://epwforge/compare-sites-v2.html"
+
+_VIEWS_DIR = Path(__file__).parent / "views"
+
+def _read_view(filename: str) -> str:
+    """Load a bundled MCP Apps view template from the package."""
+    return (_VIEWS_DIR / filename).read_text(encoding="utf-8")
+
+
 mcp = FastMCP("epwforge")
 mcp._mcp_server.version = __version__
+
+
+# ── MCP Apps UI resource: site-comparison cards ──────────────────────────────
+# CSP allowlist: unpkg.com is required to load the ext-apps client library.
+# No other external origins are loaded by compare-sites.html.
+@mcp.resource(
+    COMPARE_SITES_URI,
+    name="Site comparison cards (interactive)",
+    description=(
+        "Interactive comparison-card view shown alongside analyze_weather "
+        "multi-URL results in MCP Apps-capable hosts (Claude Desktop, "
+        "ChatGPT, VS Code, Goose). Lets the user stress-test any compared "
+        "site without retyping config."
+    ),
+    mime_type="text/html;profile=mcp-app",
+    meta={"ui": {"csp": {"resourceDomains": ["https://unpkg.com"]}}},
+)
+def compare_sites_view() -> str:
+    return _read_view("compare-sites.html")
+
+
+# ── Catalog resources (mirror of hosted MCP route.ts) ───────────────────────
+# These let local Python users browse the same reference catalogs as users
+# who go through epwforge.com/api/mcp. The hosted MCP remains the source of
+# truth for content — these are kept short and link out for full details.
+@mcp.resource(
+    "epwforge://catalog/event-types",
+    name="Extreme event catalog",
+    description="Event types valid for the `events` config param; auto-compound pairs; intensity + duration guidance.",
+    mime_type="application/json",
+)
+def catalog_event_types() -> str:
+    return json.dumps({
+        "events": [
+            {"id": "heatwave",  "description": "Extended heat — sustained daily high above local 95th-percentile DB."},
+            {"id": "coldsnap",  "description": "Extended cold — sustained daily low below local 5th-percentile DB."},
+            {"id": "hothumid",  "description": "Humidity-amplified heat. Auto-compounds with heatwave."},
+            {"id": "coldwindy", "description": "Wind-amplified cold. Auto-compounds with coldsnap."},
+        ],
+        "compound_pairs": [["heatwave", "hothumid"], ["coldsnap", "coldwindy"]],
+        "intensity_scale": {
+            "scale": "1-7 (default), unlock 8-10 with stress_test=true",
+            "meanings": {
+                "1": "Damped — 0.5x historical extreme",
+                "5": "Historical baseline (default for unspecified events)",
+                "7": "Severe — ~50-yr return period",
+                "10": "Stress test — exceeds observed historical extremes",
+            },
+        },
+        "auto_fill": "When ssp is set and intensity is left blank, the AR6 ensemble factor for that (region, ssp, year, percentile, event) is used. Cold events stay at 5.",
+        "duration_guidance": {
+            "param": "event_duration",
+            "range": "3-30 days",
+            "default": 14,
+            "recommended": "14-21 for stress-test / resilience scenarios so the event spans a full work-week of operational impact",
+            "avoid": "≤10 days for design or building-load analysis — too short to capture sustained impact",
+        },
+    }, indent=2)
 
 # Lazy client — only constructed when a tool actually needs it. Read tools
 # work without an API key (they hit public endpoints or fetch URLs directly).
@@ -78,6 +150,76 @@ def _get_client() -> EPWForgeClient:
 
 def _base_url() -> str:
     return (os.environ.get("EPWFORGE_BASE_URL") or "https://epwforge.com").rstrip("/")
+
+
+# Default to the latest TMYx EPW from the nearest real OneBuilding station
+# when the caller passes a `config` (lat/lon). Synthesized custom-location
+# TMYx is reserved as a fallback for genuinely remote sites; the caller must
+# explicitly opt into it with allow_custom_location=true.
+STATION_DISTANCE_THRESHOLD_KM = 50.0
+
+
+async def _resolve_base_url_for_config(
+    cfg: dict[str, Any] | None,
+    *,
+    allow_custom_location: bool,
+) -> dict[str, Any] | None:
+    """Look up the nearest OneBuilding station and return its EPW URL + label
+    for use as the morph base. Returns None when caller has opted into custom
+    synthesis (allow_custom_location=true) and no station is within threshold.
+    Raises EPWForgeError when no station is nearby and the caller hasn't opted
+    in (forcing the agent to confirm with the user)."""
+    if not isinstance(cfg, dict):
+        return None
+    lat, lon = cfg.get("lat"), cfg.get("lon")
+    if lat is None or lon is None:
+        return None
+    # AMY basis is necessarily synthesized (per-year hourly from ERA5).
+    if cfg.get("basis") == "amy":
+        return None
+    try:
+        resp = await _call_hosted_mcp("find_station", {"lat": lat, "lon": lon, "max_results": 1})
+    except Exception:
+        resp = {}
+    stations = resp.get("stations", []) if isinstance(resp, dict) else []
+    nearest = stations[0] if stations else None
+    dist_km = nearest.get("distance_km") if isinstance(nearest, dict) else None
+    files = nearest.get("files") if isinstance(nearest, dict) else None
+    target = None
+    if isinstance(files, list):
+        target = next((f for f in files if f.get("source") == "TMYx" and f.get("period") == "2011-2025"), None)
+        if not target:
+            target = next((f for f in files if f.get("source") == "TMYx"), None) or (files[0] if files else None)
+    if not target or not target.get("epw_url"):
+        if allow_custom_location:
+            return None
+        raise EPWForgeError(
+            404,
+            f"No OneBuilding TMYx EPW found near ({lat:.3f}, {lon:.3f}). "
+            "Confirm with the user that a synthesized custom-location TMYx (ERA5 + "
+            "Finkelstein-Schafer) is acceptable, then retry with allow_custom_location=true."
+        )
+    if isinstance(dist_km, (int, float)) and dist_km > STATION_DISTANCE_THRESHOLD_KM:
+        if not allow_custom_location:
+            raise EPWForgeError(
+                404,
+                f"Nearest OneBuilding station ({nearest.get('city', '?')}, {nearest.get('country', '?')}) "
+                f"is {dist_km:.0f} km from ({lat:.3f}, {lon:.3f}) — exceeds the {STATION_DISTANCE_THRESHOLD_KM:.0f} km "
+                "threshold for a real-station default. Ask the user if a synthesized "
+                "custom-location TMYx (ERA5 + Finkelstein-Schafer) is acceptable for this work, "
+                "then retry with allow_custom_location=true."
+            )
+        return None
+    return {
+        "base_url": target["epw_url"],
+        "base_url_label": (
+            f"Real {target.get('source','TMYx')} {target.get('period','')}".strip()
+            + f" from {nearest.get('city','nearest station')}"
+            + (f" ({dist_km:.0f} km)" if isinstance(dist_km, (int, float)) else "")
+        ),
+        "station": nearest,
+        "file": target,
+    }
 
 
 # ============================================================================
@@ -207,7 +349,14 @@ async def find_station(
 # ============================================================================
 # Tool 2: analyze_weather — no auth needed (URL, urls, or config)
 # ============================================================================
-@mcp.tool()
+@mcp.tool(meta={
+    # MCP Apps (SEP-1865): when multi-URL results are returned to an Apps-
+    # capable host, render the compare-sites card view instead of raw JSON.
+    # The view itself decides whether to render (presence of `summaries[]`)
+    # — single-URL and config-mode calls still show as text.
+    "ui": {"resourceUri": COMPARE_SITES_URI},
+    "ui/resourceUri": COMPARE_SITES_URI,  # legacy spec key
+})
 async def analyze_weather(
     url: Annotated[
         str | None,
@@ -219,8 +368,12 @@ async def analyze_weather(
             min_length=2,
             max_length=10,
             description=(
-                "Multiple EPW URLs to compare (2-10). First is the baseline; "
-                "others are reported as deltas from it."
+                "Multiple EPW URLs to compare (2-10) in ONE call. First is the baseline; "
+                "others are reported as deltas from it. **Use this for ANY multi-site "
+                "comparison** (data center siting, climate-zone spread, portfolio "
+                "resilience). The card UI renders all sites side-by-side with future "
+                "deltas inline. Do NOT loop analyze_weather with single configs to fake "
+                "a comparison — pass all URLs here."
             ),
         ),
     ] = None,
@@ -228,12 +381,31 @@ async def analyze_weather(
         dict[str, Any] | None,
         Field(
             description=(
-                "Synthesize an EPW server-side and analyze it. Same params as "
-                "generate_weather_file (lat, lon, ssp, year, percentile, uhi, "
-                "events, intensity, smoke, smoke_intensity, etc.). Routes through "
-                "the hosted MCP at /api/mcp — runs the full morph/UHI/event pipeline "
-                "and returns ONLY stats. The EPW content never reaches the caller. "
-                "Anon-safe; no API key or credits required."
+                "Synthesize a SINGLE morphed EPW server-side and analyze it. Required: "
+                "`lat` (-90..90), `lon` (-180..180). Common params:\n"
+                "  • ssp: 'ssp126'|'ssp245'|'ssp370'|'ssp585' — emission scenario. "
+                "For credible upper-bound design use 'ssp370' (CMIP7 deemed ssp585 "
+                "implausible). Default no SSP = present-day TMY.\n"
+                "  • year: 2030|2050|2070|2090 — future horizon. Pair with ssp.\n"
+                "  • percentile: 5|10|25|50|75|90|95 — warming percentile across CMIP6 "
+                "models. **Use 75 for design-realistic warming; 50 is the median and "
+                "underestimates the tail for siting/sizing work.** Default 50.\n"
+                "  • uhi: 'none'|'suburban'|'urban'|'dense_urban' — UHI preset.\n"
+                "  • events: comma-separated string of 'heatwave','coldsnap','hothumid',"
+                "'coldwindy'. Auto-compounds heat+humid and cold+wind pairs.\n"
+                "  • intensity: per-event string like 'heatwave:8,coldsnap:7'. 5 = "
+                "typical extreme, 7 = severe ~50-yr return, 8-10 = stress-test (requires "
+                "stress_test=true). Leave blank with ssp set to auto-fill from AR6.\n"
+                "  • event_duration: integer 3-30, **default 14**. For stress-test or "
+                "resilience scenarios use 14-21 days — shorter durations don't capture "
+                "sustained operational impact. 7 is too short for any design work.\n"
+                "  • smoke: bool. smoke_intensity: 1-10 (peak AOD 0.1-6.0). "
+                "smoke_duration: 3-30 days, default 14 (NOT 7).\n"
+                "  • stress_test: bool — unlocks intensity 8-10.\n"
+                "Use for: (a) drilling into ONE site at a specific future scenario, or "
+                "(b) stress-testing event compounds. **Never loop for multi-site work** "
+                "— use `urls=[...]` instead. Routes through the hosted MCP — runs the "
+                "full morph/UHI/event pipeline and returns ONLY stats. Anon-safe."
             )
         ),
     ] = None,
@@ -253,6 +425,35 @@ async def analyze_weather(
         Literal["imperial", "metric"],
         Field(description="Output units (default imperial). When 'metric', temperatures are °C, HDD/CDD base 18 °C, elevation in m. Routes through hosted MCP."),
     ] = "imperial",
+    include_future_projection: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true (default for multi-URL comparisons) runs the SSP 3-7.0 P75 2050 "
+                "morph pipeline per site (via hosted MCP) and embeds future-projected "
+                "design conditions and CDD-65 deltas under each summary's `future_projection`. "
+                "Lets a UI show '92.8 → 97.7 °F' baseline→future on each card. Per CMIP7 "
+                "guidance, SSP 3-7.0 is the credible upper bound (SSP 5-8.5 was deemed "
+                "implausible). P75 is the design-realistic warming percentile vs P50 median. "
+                "Adds N hosted MCP calls; parallelized via asyncio.gather. Free. Set to false "
+                "to skip for a faster baseline-only response."
+            )
+        ),
+    ] = True,
+    allow_custom_location: Annotated[
+        bool,
+        Field(
+            description=(
+                "Required to fall back to synthesized TMYx when no real OneBuilding "
+                "station is within 50 km of the requested lat/lon. By default, config-mode "
+                "uses the nearest real station's TMYx EPW as the morph base — synthesizing "
+                "from ERA5 is reserved for genuinely remote sites. If the nearest station "
+                "is >50 km away and this flag is false, the call returns an error asking "
+                "you to confirm a custom synthesized location is acceptable, then retry "
+                "with allow_custom_location=true."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Compute design conditions, HDD/CDD, monthly stats, and peak days for one
     or more EPW files. No EPW content returned — stats only.
@@ -262,6 +463,25 @@ async def analyze_weather(
       2. Multi-URL comparison: analyze_weather(urls=["...", "...", "..."])
       3. Synthesized config: analyze_weather(config={"lat": 40.7, "lon": -74,
           "ssp": "ssp585", "year": 2050, "uhi": "urban"})
+
+    ⚠ CRITICAL ROUTING RULE — read before calling:
+
+    If the user is comparing N sites (data-center siting, climate-zone
+    spread, portfolio resilience, etc.) you MUST:
+      1. Call `find_station` once per city to get its EPW URL
+      2. Call `analyze_weather` EXACTLY ONCE with `urls=[all N urls]`
+
+    Do NOT call analyze_weather N times in a loop with single configs.
+    That breaks the comparison card UI (each call renders a separate
+    blank widget), produces no future-projection deltas, and is slow.
+
+    `include_future_projection=true` (the default for url-mode) embeds
+    SSP 3-7.0 P75 2050 design conditions per site in one shot, which is
+    what the inline card UI needs.
+
+    Use `config` mode ONLY for: (a) a single site morphed to a specific
+    future scenario, or (b) stress-testing event compounds for one site.
+    Never use config mode in a loop to fake a comparison.
 
     Modes 1 + 2 download the URLs and parse locally (purely client-side).
     Mode 3 routes through the hosted EPWForge MCP so the morph/UHI/event/smoke
@@ -275,6 +495,189 @@ async def analyze_weather(
     if len(inputs_set) != 1:
         raise ValueError("analyze_weather requires exactly one of: url, urls, config")
 
+    # Post-processing hook: when the caller wants future-projected design
+    # conditions, apply CMIP6 monthly delta-T values **to the real baseline**
+    # (no synthesis). Belcher-style mean shift only at the design-condition
+    # level. For each site, fetch climate_deltas via find_station and apply
+    # to that site's real baseline. Total cost: N parallel hosted calls,
+    # ~3-5s end-to-end.
+    async def _attach_future_projection(summaries_in: list[dict[str, Any]]) -> None:
+        if not include_future_projection or not summaries_in:
+            return
+        FUTURE_SSP = "ssp370"
+        FUTURE_YEAR = 2050
+        FUTURE_PCT  = 75
+        async def _future_for(s: dict[str, Any]) -> dict[str, Any]:
+            loc = s.get("location") or {}
+            lat, lon = loc.get("lat"), loc.get("lon")
+            if lat is None or lon is None:
+                return {"error": "missing lat/lon on baseline EPW"}
+            try:
+                # Fetch monthly CMIP6 delta-T (°C) for this site/scenario.
+                # find_station with include_climate_deltas returns deltas at
+                # top level; no EPW synthesis happens.
+                resp = await _call_hosted_mcp("find_station", {
+                    "lat": lat, "lon": lon,
+                    "include_climate_deltas": True,
+                    "ssp": FUTURE_SSP, "year": FUTURE_YEAR, "percentile": FUTURE_PCT,
+                    "max_results": 1,
+                })
+                cd = resp.get("climate_deltas") if isinstance(resp, dict) else None
+                if not cd or not cd.get("delta_temp") or len(cd["delta_temp"]) != 12:
+                    return {"error": "climate deltas unavailable", "ssp": FUTURE_SSP, "year": FUTURE_YEAR, "percentile": FUTURE_PCT}
+                # 12 monthly delta-T (°C → °F)
+                d_f = [v * 9.0 / 5.0 for v in cd["delta_temp"]]
+                base_cool = s.get("cooling_design_db_F")
+                base_heat = s.get("heating_design_db_F")
+                base_cdd  = s.get("cdd_65_annual")
+                base_hdd  = s.get("hdd_65_annual")
+                base_monthly = s.get("monthly_mean_temp_F") or []
+                base_annual_mean = s.get("annual_mean_temp_F")
+                # Cooling design (99% annual DB) peaks in summer: apply max of Jun/Jul/Aug delta.
+                summer_delta = max(d_f[5], d_f[6], d_f[7]) if len(d_f) == 12 else max(d_f)
+                # Heating design (1% annual DB) hits in winter: apply min of Dec/Jan/Feb delta.
+                winter_delta = min(d_f[11], d_f[0], d_f[1]) if len(d_f) == 12 else min(d_f)
+                # Recompute CDD/HDD from monthly means + month-wise deltas (approx, monthly mean basis).
+                future_cdd = future_hdd = None
+                if len(base_monthly) == 12:
+                    DAYS = [31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                    future_monthly = [m + d for m, d in zip(base_monthly, d_f)]
+                    future_cdd = round(sum(max(0.0, m - 65) * d for m, d in zip(future_monthly, DAYS)))
+                    future_hdd = round(sum(max(0.0, 65 - m) * d for m, d in zip(future_monthly, DAYS)))
+                cdd_pct = round((future_cdd - base_cdd) / base_cdd * 100) if (base_cdd and future_cdd and base_cdd > 0) else None
+                annual_delta_F = round(sum(d_f) / 12, 1) if len(d_f) == 12 else None
+                future_annual_mean = round(base_annual_mean + annual_delta_F, 1) if (base_annual_mean is not None and annual_delta_F is not None) else None
+                return {
+                    "ssp": FUTURE_SSP,
+                    "year": FUTURE_YEAR,
+                    "percentile": FUTURE_PCT,
+                    "method": "CMIP6 monthly delta-T applied to real baseline (no EPW synthesis)",
+                    "cooling_design_db_F": round(base_cool + summer_delta, 1) if base_cool is not None else None,
+                    "heating_design_db_F": round(base_heat + winter_delta, 1) if base_heat is not None else None,
+                    "annual_mean_temp_F":  future_annual_mean,
+                    "cdd_65_annual":       future_cdd,
+                    "hdd_65_annual":       future_hdd,
+                    "cdd_pct_delta":       cdd_pct,
+                }
+            except Exception as e:
+                return {"error": str(e), "ssp": FUTURE_SSP, "year": FUTURE_YEAR, "percentile": FUTURE_PCT}
+        futures = await asyncio.gather(*(_future_for(s) for s in summaries_in))
+        for s, fp in zip(summaries_in, futures):
+            s["future_projection"] = fp
+
+    # Helper: reverse-geocode lat/lon to a nearby GuzzStation name. Used for
+    # config-mode responses that come back with location="Custom, Unknown".
+    async def _nearest_station(lat: float | None, lon: float | None) -> dict[str, Any] | None:
+        if lat is None or lon is None:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "epwforge-mcp"}, follow_redirects=True) as c:
+                r = await c.get(f"{_base_url()}/api/stations", params={"lat": lat, "lon": lon, "limit": 1})
+                if r.status_code == 200:
+                    stations = r.json().get("stations", [])
+                    if stations:
+                        return stations[0]
+        except Exception:
+            pass
+        return None
+
+    def _apply_station_to_location(result_obj: dict[str, Any], nearest: dict[str, Any]) -> None:
+        loc = result_obj.get("location") or {}
+        is_generic = (
+            not loc.get("city")
+            or loc.get("city") in ("Custom", "Unknown", "")
+            or not loc.get("state")
+            or loc.get("country") in ("Unknown", "", None)
+        )
+        if not is_generic:
+            return
+        loc["city"]    = nearest.get("city")    or nearest.get("name") or loc.get("city")    or "Unknown"
+        loc["state"]   = nearest.get("state")   or loc.get("state", "")
+        loc["country"] = nearest.get("country") or loc.get("country") or "Unknown"
+        if (not loc.get("elevation_ft") or loc.get("elevation_ft") == 0) and nearest.get("elevation_m") is not None:
+            loc["elevation_ft"] = round(nearest["elevation_m"] * 3.28084)
+        result_obj["location"] = loc
+        dist = nearest.get("distance_km")
+        result_obj.setdefault("location_meta", {})["enriched_from"] = (
+            f"nearest station ({dist:.0f} km)" if isinstance(dist, (int, float)) else "nearest station"
+        )
+
+    async def _enrich_config_location(result_obj: Any, cfg: dict[str, Any] | None) -> None:
+        """If a config-mode result has a generic Custom/Unknown location, fill it via nearest station."""
+        if not isinstance(result_obj, dict) or not isinstance(cfg, dict):
+            return
+        nearest = await _nearest_station(cfg.get("lat"), cfg.get("lon"))
+        if nearest:
+            _apply_station_to_location(result_obj, nearest)
+
+    # _resolve_base_url_for_config is module-level so chart_weather can reuse it.
+    # See module-level definition near top of file.
+
+    # Anything in the config that triggers the morph/event/smoke/UHI pipeline.
+    # When set, the result is a *modified* scenario — useless without baseline
+    # for comparison.
+    def _config_is_morphed(cfg: dict[str, Any] | None) -> bool:
+        if not isinstance(cfg, dict):
+            return False
+        if cfg.get("ssp") or cfg.get("year"):
+            return True
+        if cfg.get("uhi") and cfg.get("uhi") != "none":
+            return True
+        if cfg.get("events") or cfg.get("intensity"):
+            return True
+        if cfg.get("smoke"):
+            return True
+        if cfg.get("stress_test"):
+            return True
+        return False
+
+    async def _attach_baseline_reference(result_obj: Any, cfg: dict[str, Any] | None) -> None:
+        """For config-mode stress/morph results, fetch the **real OneBuilding
+        TMYx EPW** at the nearest station and use it as the baseline reference
+        so the UI can render '88 → 101 °F' deltas. Skipped when the config is
+        already baseline (no morphing params). Never synthesizes — uses the
+        actual file a user would download via find_station."""
+        if not isinstance(result_obj, dict) or not isinstance(cfg, dict):
+            return
+        if not _config_is_morphed(cfg):
+            return
+        lat, lon = cfg.get("lat"), cfg.get("lon")
+        if lat is None or lon is None:
+            return
+        try:
+            # Step 1: nearest OneBuilding station + its TMYx EPW URL
+            resp = await _call_hosted_mcp("find_station", {
+                "lat": lat, "lon": lon, "max_results": 1,
+            })
+            stations = resp.get("stations", []) if isinstance(resp, dict) else []
+            if not stations:
+                return
+            files = stations[0].get("files") or []
+            # Prefer 2011-2025 TMYx; fall back to first available.
+            preferred = next((f for f in files if f.get("source") == "TMYx" and f.get("period") == "2011-2025"), None)
+            target = preferred or (files[0] if files else None)
+            if not target or not target.get("epw_url"):
+                return
+            # Step 2: fetch and parse the real EPW (no synthesis)
+            text = await download_text(target["epw_url"])
+            baseline_epw = parse_epw(text)
+            baseline = _summarize_epw(baseline_epw, source_url=target["epw_url"])
+            dist_km = stations[0].get("distance_km")
+            result_obj["baseline_reference"] = {
+                "cooling_design_db_F": baseline.get("cooling_design_db_F"),
+                "heating_design_db_F": baseline.get("heating_design_db_F"),
+                "annual_mean_temp_F":  baseline.get("annual_mean_temp_F"),
+                "cdd_65_annual":       baseline.get("cdd_65_annual"),
+                "hdd_65_annual":       baseline.get("hdd_65_annual"),
+                "source_url":          target["epw_url"],
+                "source_label":        f"Real TMYx from {stations[0].get('city', 'nearest station')}" + (f" ({dist_km:.0f} km away)" if isinstance(dist_km, (int, float)) else ""),
+                "vintage":             f"{target.get('source', 'TMYx')} {target.get('period', '')}".strip(),
+                "method":              "Real OneBuilding TMYx EPW (no synthesis)",
+            }
+        except Exception:
+            # Silent fallback: don't break the morphed response if baseline lookup fails.
+            pass
+
     # If any enrichment (or metric units) is requested, route through hosted
     # MCP — it has the IDF emitter, full-ASHRAE computation, improbability
     # scorer, and the unit-converted summarizer all in lib.
@@ -287,14 +690,45 @@ async def analyze_weather(
         }
         if url: payload["url"] = url
         if urls: payload["urls"] = urls
-        if config: payload["config"] = config
-        return await _call_hosted_mcp("analyze_weather", payload)
+        if config:
+            # Inject real-station base_url when one is within threshold; raises
+            # EPWForgeError telling the agent to confirm custom synth if not.
+            base = await _resolve_base_url_for_config(config, allow_custom_location=allow_custom_location)
+            cfg_with_base = {**config}
+            if base:
+                cfg_with_base["base_url"] = base["base_url"]
+                cfg_with_base["base_url_label"] = base["base_url_label"]
+            payload["config"] = cfg_with_base
+        result = await _call_hosted_mcp("analyze_weather", payload)
+        # Hosted MCP doesn't yet know about include_future_projection — we
+        # post-process its summaries locally to attach it. Works for either
+        # multi-URL (summaries[] array) or single-URL (result IS the summary).
+        if include_future_projection and isinstance(result, dict):
+            if urls:
+                inner_summaries = result.get("summaries")
+                if isinstance(inner_summaries, list):
+                    await _attach_future_projection(inner_summaries)
+            elif url:
+                await _attach_future_projection([result])
+        # Config mode + any enrichment came back with "Custom/Unknown" location
+        # because hosted MCP doesn't reverse-geocode lat/lon. Fix it. Also attach
+        # a baseline reference so the UI can show before→after deltas for any
+        # morphed/stressed scenario.
+        if config:
+            await asyncio.gather(
+                _enrich_config_location(result, config),
+                _attach_baseline_reference(result, config),
+            )
+        return result
 
-    # Single URL — local fetch + parse.
+    # Single URL — local fetch + parse, with optional future projection.
     if url:
         text = await download_text(url)
         epw = parse_epw(text)
-        return _summarize_epw(epw, source_url=url)
+        summary = _summarize_epw(epw, source_url=url)
+        if include_future_projection:
+            await _attach_future_projection([summary])
+        return summary
 
     # Multi-URL comparison — parallel fetch + parse, deltas vs first.
     if urls:
@@ -302,6 +736,8 @@ async def analyze_weather(
             text = await download_text(u)
             return _summarize_epw(parse_epw(text), source_url=u)
         summaries = list(await asyncio.gather(*(_one(u) for u in urls)))
+        await _attach_future_projection(summaries)
+
         baseline = summaries[0]
         comparisons = [
             {
@@ -317,11 +753,24 @@ async def analyze_weather(
             "count": len(summaries),
             "summaries": summaries,
             "comparisons": comparisons,
-            "meta": _meta("analyze_weather", mode="compare", n_urls=len(urls)),
+            "meta": _meta("analyze_weather", mode="compare", n_urls=len(urls), future_projection=include_future_projection),
         }
 
-    # config mode — route through hosted MCP for the pipeline run.
-    return await _call_hosted_mcp("analyze_weather", {"config": config})
+    # config mode — route through hosted MCP for the pipeline run, then
+    # enrich the location and attach baseline reference if morphed.
+    # First inject real-station base_url so morph operates on the actual
+    # OneBuilding TMYx (or raise asking the agent to confirm custom synth).
+    base = await _resolve_base_url_for_config(config, allow_custom_location=allow_custom_location)
+    cfg_with_base = {**config}
+    if base:
+        cfg_with_base["base_url"] = base["base_url"]
+        cfg_with_base["base_url_label"] = base["base_url_label"]
+    morph = await _call_hosted_mcp("analyze_weather", {"config": cfg_with_base})
+    await asyncio.gather(
+        _enrich_config_location(morph, config),
+        _attach_baseline_reference(morph, config),
+    )
+    return morph
 
 
 # ============================================================================
@@ -374,6 +823,16 @@ async def chart_weather(
         str | None,
         Field(description="When set, writes SVG to this path and returns the path (saves agent context)."),
     ] = None,
+    allow_custom_location: Annotated[
+        bool,
+        Field(description=(
+            "Required to fall back to synthesized TMYx when no real OneBuilding station "
+            "is within 50 km of the requested lat/lon (config mode only). Default false: "
+            "config-mode chart uses the nearest real station's TMYx EPW as the morph base. "
+            "If no station nearby and this flag is false, the call returns an error asking "
+            "you to confirm a custom synthesized location is acceptable."
+        )),
+    ] = False,
 ) -> dict[str, Any]:
     """Render an SVG chart from EPW data.
 
@@ -395,7 +854,14 @@ async def chart_weather(
         payload: dict[str, Any] = {"chart_type": chart_type, "resolution": resolution}
         if url: payload["url"] = url
         if urls: payload["urls"] = urls
-        if config: payload["config"] = config
+        if config:
+            # Real-station default (50 km threshold) — see analyze_weather for rationale.
+            base = await _resolve_base_url_for_config(config, allow_custom_location=allow_custom_location)
+            cfg_with_base = {**config}
+            if base:
+                cfg_with_base["base_url"] = base["base_url"]
+                cfg_with_base["base_url_label"] = base["base_url_label"]
+            payload["config"] = cfg_with_base
         result = await _call_hosted_mcp("chart_weather", payload)
         # Hosted MCP may have auto-uploaded large SVGs to Blob and replaced
         # the `svg` field with `svg_url`. Honor save_to for inline SVGs;
@@ -423,8 +889,14 @@ async def chart_weather(
             epw = parse_epw(text)
             svg = diurnal_profile_svg(epw)
             return _chart_result(svg, "diurnal", url, save_to)
-        # config — route through hosted MCP (it will fetch text internally).
-        result = await _call_hosted_mcp("chart_weather", {"config": config, "chart_type": "diurnal"})
+        # config — route through hosted MCP (it will fetch text internally),
+        # injecting real-station base_url so morph operates on the real EPW.
+        base = await _resolve_base_url_for_config(config, allow_custom_location=allow_custom_location)
+        cfg_with_base = {**config}
+        if base:
+            cfg_with_base["base_url"] = base["base_url"]
+            cfg_with_base["base_url_label"] = base["base_url_label"]
+        result = await _call_hosted_mcp("chart_weather", {"config": cfg_with_base, "chart_type": "diurnal"})
         svg = result.get("svg")
         if save_to and svg:
             return _save_svg(svg, "diurnal", "synthesized", save_to, extra={"weather_basis": result.get("weather_basis")})

@@ -12,7 +12,7 @@ EPWForge generates and morphs weather files (`.epw`, `.ddy`) for building energy
 
 - **TMYx generation anywhere** — typical meteorological years synthesized from ERA5 reanalysis for any global lat/lon
 - **AMY (Actual Meteorological Year)** — historical hourly weather for hindcasting and calibration
-- **CMIP6 climate morphing** — apply future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0, SSP5-8.5) at 7 warming percentiles
+- **CMIP6 climate morphing** — apply future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0) at 7 warming percentiles. SSP5-8.5 was deprecated per CMIP7 (deemed implausible) — use SSP3-7.0 as the high-end scenario.
 - **Urban Heat Island adjustment** — Stewart & Oke LCZ presets (suburban / urban / dense_urban)
 - **Extreme event injection** — heat waves, cold snaps, humidity events, wind events, with auto-compound blending and per-event intensity (1-10 slider, AR6-auto-fill under SSP)
 - **Wildfire smoke overlays** — CAMS-derived AOD with Beer-Lambert solar attenuation
@@ -42,17 +42,18 @@ epw_url = stations["stations"][0]["files"][0]["epw_url"]
 stats = await analyze_weather(url=epw_url)
 # → cooling 89.1 F, heating 16.0 F, HDD/CDD 5265/914 ...
 
-# 3. preview what a 2050 SSP585 + urban-UHI scenario looks like
+# 3. preview what a 2050 SSP3-7.0 + urban-UHI scenario looks like
 # (routes through hosted MCP — runs the pipeline, returns stats only)
+# SSP3-7.0 is the high-end scenario; SSP5-8.5 was deprecated per CMIP7.
 future = await analyze_weather(config={
     "lat": 42.36, "lon": -71.06,
-    "ssp": "ssp585", "year": 2050, "uhi": "urban",
+    "ssp": "ssp370", "year": 2050, "uhi": "urban",
 })
-# → cooling 92.3 F (+3.2), heating 26.2 F (+10.2) ...
+# → cooling 91.4 F (+2.3), heating 23.8 F (+7.8) ...
 
 # 4. chart it
 svg = await chart_weather(config={
-    "lat": 42.36, "lon": -71.06, "ssp": "ssp585", "year": 2050,
+    "lat": 42.36, "lon": -71.06, "ssp": "ssp370", "year": 2050,
 }, chart_type="diurnal")
 ```
 
@@ -62,7 +63,7 @@ svg = await chart_weather(config={
 # Requires EPWFORGE_API_KEY in env
 await generate_weather_file(
     lat=40.71, lon=-74.01,
-    ssp="ssp585", year=2090, percentile=90,
+    ssp="ssp370", year=2090, percentile=90,
     uhi="urban",
     events="heatwave,hothumid",
     event_duration=14,

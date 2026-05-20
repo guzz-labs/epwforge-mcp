@@ -66,6 +66,7 @@ VALID_EVENTS = ("heatwave", "coldsnap", "hothumid", "coldwindy")
 # Code, Goose). Clients without MCP Apps support fall back to the plain-text
 # tool response — no regression.
 COMPARE_SITES_URI = "ui://epwforge/compare-sites-v2.html"
+DESIGN_EXPLORER_URI = "ui://epwforge/design-explorer-v1.html"
 
 _VIEWS_DIR = Path(__file__).parent / "views"
 
@@ -95,6 +96,21 @@ mcp._mcp_server.version = __version__
 )
 def compare_sites_view() -> str:
     return _read_view("compare-sites.html")
+
+
+@mcp.resource(
+    DESIGN_EXPLORER_URI,
+    name="Design conditions explorer (interactive)",
+    description=(
+        "Single-site live-tuning widget shown when explore_design_conditions "
+        "is called. Sliders for SSP / year / percentile / UHI re-call the tool "
+        "on change and re-render the diurnal chart + design-condition stats."
+    ),
+    mime_type="text/html;profile=mcp-app",
+    meta={"ui": {"csp": {"resourceDomains": ["https://unpkg.com"]}}},
+)
+def design_explorer_view() -> str:
+    return _read_view("design-explorer.html")
 
 
 # ── Catalog resources (mirror of hosted MCP route.ts) ───────────────────────
@@ -157,6 +173,31 @@ def _base_url() -> str:
 # TMYx is reserved as a fallback for genuinely remote sites; the caller must
 # explicitly opt into it with allow_custom_location=true.
 STATION_DISTANCE_THRESHOLD_KM = 50.0
+
+
+# Belt-and-suspenders against ssp585 — the Literal enums already exclude it,
+# but the `config` and `scenarios` params on analyze_weather / chart_weather /
+# generate_weather_file are pass-through dicts where pydantic can't enforce
+# the enum. Reject early so the agent gets a clean deprecation message instead
+# of a confused 400 from the backend.
+def _assert_ssp_allowed(*args: Any) -> None:
+    """Walk dict-shaped tool args and reject any nested ssp == 'ssp585'.
+    Skips None and non-dict inputs so callers don't need to pre-filter."""
+    def _check(obj: Any, path: str) -> None:
+        if isinstance(obj, dict):
+            if obj.get("ssp") == "ssp585":
+                raise ValueError(
+                    f"ssp585 (SSP5-8.5) is deprecated per CMIP7 — the IPCC AR6 and the "
+                    f"upcoming CMIP7 generation deem its trajectory implausible. Found at "
+                    f"{path}.ssp. Retry with ssp='ssp370' (the recommended high-end scenario)."
+                )
+            for k, v in obj.items():
+                _check(v, f"{path}.{k}")
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                _check(v, f"{path}[{i}]")
+    for i, a in enumerate(args):
+        _check(a, f"arg{i}")
 
 
 async def _resolve_base_url_for_config(
@@ -256,8 +297,8 @@ async def find_station(
         Field(description="When True with lat+lon+ssp+year, also returns the monthly CMIP6 delta-T. Routes through hosted MCP."),
     ] = False,
     ssp: Annotated[
-        Literal["ssp126", "ssp245", "ssp370", "ssp585"] | None,
-        Field(description="SSP scenario (only used with include_climate_deltas)"),
+        Literal["ssp126", "ssp245", "ssp370"] | None,
+        Field(description="SSP scenario (only used with include_climate_deltas). ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
     ] = None,
     year: Annotated[
         Literal[2030, 2050, 2070, 2090] | None,
@@ -383,9 +424,10 @@ async def analyze_weather(
             description=(
                 "Synthesize a SINGLE morphed EPW server-side and analyze it. Required: "
                 "`lat` (-90..90), `lon` (-180..180). Common params:\n"
-                "  • ssp: 'ssp126'|'ssp245'|'ssp370'|'ssp585' — emission scenario. "
-                "For credible upper-bound design use 'ssp370' (CMIP7 deemed ssp585 "
-                "implausible). Default no SSP = present-day TMY.\n"
+                "  • ssp: 'ssp126'|'ssp245'|'ssp370' — emission scenario. "
+                "ssp370 is the credible upper bound (ssp585 was deprecated per "
+                "CMIP7 — deemed implausible — and is rejected). Default no SSP = "
+                "present-day TMY.\n"
                 "  • year: 2030|2050|2070|2090 — future horizon. Pair with ssp.\n"
                 "  • percentile: 5|10|25|50|75|90|95 — warming percentile across CMIP6 "
                 "models. **Use 75 for design-realistic warming; 50 is the median and "
@@ -462,7 +504,7 @@ async def analyze_weather(
       1. Single URL: analyze_weather(url="https://...")
       2. Multi-URL comparison: analyze_weather(urls=["...", "...", "..."])
       3. Synthesized config: analyze_weather(config={"lat": 40.7, "lon": -74,
-          "ssp": "ssp585", "year": 2050, "uhi": "urban"})
+          "ssp": "ssp370", "year": 2050, "uhi": "urban"})
 
     ⚠ CRITICAL ROUTING RULE — read before calling:
 
@@ -494,6 +536,7 @@ async def analyze_weather(
     inputs_set = [x for x in (url, urls, config) if x is not None]
     if len(inputs_set) != 1:
         raise ValueError("analyze_weather requires exactly one of: url, urls, config")
+    _assert_ssp_allowed(config)
 
     # Post-processing hook: when the caller wants future-projected design
     # conditions, apply CMIP6 monthly delta-T values **to the real baseline**
@@ -848,6 +891,7 @@ async def chart_weather(
     inputs_set = [x for x in (url, urls, config) if x is not None]
     if len(inputs_set) != 1:
         raise ValueError("chart_weather requires exactly one of: url, urls, config")
+    _assert_ssp_allowed(config)
 
     # New chart types (added in 0.3.0) live only in the hosted MCP; route there.
     if chart_type in ("temp_carpet", "wind_rose", "monthly_boxplot"):
@@ -928,7 +972,97 @@ async def chart_weather(
 
 
 # ============================================================================
-# Tool 4: generate_weather_file — auth + credits required
+# Tool 4 (new in 0.5.1): explore_design_conditions — interactive single-site
+#                        widget for tuning SSP / year / percentile / UHI live
+# ============================================================================
+@mcp.tool(meta={
+    "ui": {"resourceUri": DESIGN_EXPLORER_URI},
+    "ui/resourceUri": DESIGN_EXPLORER_URI,  # legacy spec key
+})
+async def explore_design_conditions(
+    lat: Annotated[float, Field(ge=-90, le=90, description="Latitude, decimal degrees")],
+    lon: Annotated[float, Field(ge=-180, le=180, description="Longitude, decimal degrees")],
+    ssp: Annotated[
+        Literal["ssp126", "ssp245", "ssp370"] | None,
+        Field(description="CMIP6 emission scenario. Pass None / omit for present-day TMY. ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
+    ] = None,
+    year: Annotated[
+        Literal[2030, 2050, 2070, 2090] | None,
+        Field(description="Future horizon. Pair with ssp."),
+    ] = None,
+    percentile: Annotated[
+        int,
+        Field(ge=5, le=95, description="Warming percentile across CMIP6 models. Use 75 for design-realistic; 50 is median."),
+    ] = 75,
+    uhi: Annotated[
+        Literal["none", "suburban", "urban", "dense_urban"],
+        Field(description="Urban Heat Island preset."),
+    ] = "none",
+    allow_custom_location: Annotated[
+        bool,
+        Field(description=(
+            "Required when no OneBuilding station is within 50 km. By default this tool "
+            "uses the nearest real station's TMYx EPW as the morph base."
+        )),
+    ] = False,
+) -> dict[str, Any]:
+    """Interactive single-site design-conditions explorer.
+
+    Returns the full ASHRAE design conditions + a diurnal-profile SVG chart
+    for the requested scenario. In MCP Apps-capable hosts (Claude Desktop,
+    ChatGPT, VS Code, Goose), the response renders as a widget with sliders
+    for SSP / year / percentile / UHI; dragging a slider re-calls this tool
+    with the new value and re-renders the chart + stats live.
+
+    Use when the user wants to interactively tune a single site — much
+    better UX than asking them to retype config each time. For multi-site
+    comparison, use analyze_weather(urls=[...]) which renders cards.
+
+    Defaults: present-day TMY (no morph) — pass ssp+year for future scenarios.
+    P75 default percentile is design-realistic; P50 underestimates the tail.
+
+    No auth required.
+    """
+    # Build config — drop None values so analyze_weather sees a clean dict.
+    cfg: dict[str, Any] = {
+        "lat": lat,
+        "lon": lon,
+        "percentile": percentile,
+        "uhi": uhi,
+    }
+    if ssp:  cfg["ssp"] = ssp
+    if year: cfg["year"] = year
+
+    # Parallel: stats (with full ASHRAE) + diurnal chart. Each call goes
+    # through analyze_weather / chart_weather which apply the v0.5.0
+    # real-station base_url default for free.
+    stats_task = analyze_weather(
+        config=cfg,
+        include_full_ashrae=True,
+        allow_custom_location=allow_custom_location,
+    )
+    chart_task = chart_weather(
+        config=cfg,
+        chart_type="diurnal",
+        allow_custom_location=allow_custom_location,
+    )
+    stats, chart = await asyncio.gather(stats_task, chart_task)
+
+    return {
+        "analysis": stats,
+        "chart_svg": chart.get("svg") if isinstance(chart, dict) else None,
+        "control_state": {
+            "ssp": ssp,
+            "year": year,
+            "percentile": percentile,
+            "uhi": uhi,
+        },
+        "meta": _meta("explore_design_conditions"),
+    }
+
+
+# ============================================================================
+# Tool 5: generate_weather_file — auth + credits required
 # ============================================================================
 @mcp.tool()
 async def generate_weather_file(
@@ -940,8 +1074,8 @@ async def generate_weather_file(
     ] = "tmy",
     amy_year: Annotated[int | None, Field(description="Year for AMY basis. Only when basis='amy'.")] = None,
     ssp: Annotated[
-        Literal["ssp126", "ssp245", "ssp370", "ssp585"] | None,
-        Field(description="CMIP6 emission scenario for future-climate morphing."),
+        Literal["ssp126", "ssp245", "ssp370"] | None,
+        Field(description="CMIP6 emission scenario for future-climate morphing. ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
     ] = None,
     year: Annotated[
         Literal[2030, 2050, 2070, 2090] | None,
@@ -1018,6 +1152,7 @@ async def generate_weather_file(
     chart_weather with a `config` argument — same morph/UHI/event pipeline,
     stats/SVG returned, no EPW delivered.
     """
+    _assert_ssp_allowed(scenarios)
     client = _get_client()
     client.require_api_key()
 

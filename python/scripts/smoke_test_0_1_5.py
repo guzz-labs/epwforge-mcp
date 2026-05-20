@@ -129,15 +129,15 @@ async def main() -> None:
          "cooling_db_F": 91.4, "cooling_db_delta_F": 4.0,
          "heating_db_F": 21.2, "heating_db_delta_F": 4.7,
          "dewpoint_F": 77.2, "dewpoint_delta_F": 3.8},
-        {"config": {"ssp": "ssp585", "year": 2090, "percentile": 90, "uhi": "urban"},
-         "cooling_db_F": 104.2, "cooling_db_delta_F": 16.8,
-         "heating_db_F": 28.2, "heating_db_delta_F": 11.7,
-         "dewpoint_F": 90.5, "dewpoint_delta_F": 17.1},
+        {"config": {"ssp": "ssp370", "year": 2090, "percentile": 90, "uhi": "urban"},
+         "cooling_db_F": 101.6, "cooling_db_delta_F": 14.2,
+         "heating_db_F": 26.8, "heating_db_delta_F": 10.3,
+         "dewpoint_F": 88.2, "dewpoint_delta_F": 14.8},
     ]
     cc = await chart_compare_scenarios(baseline=fake_baseline, scenarios=fake_scenarios, save_to=str(tmp / "deltas.svg"))
     print(json.dumps(_short(cc, depth=2), indent=2))
     out_svg = (tmp / "deltas.svg").read_text()
-    assert "<svg" in out_svg and "SSP585" in out_svg and "+16.8" in out_svg
+    assert "<svg" in out_svg and "SSP370" in out_svg and "+14.2" in out_svg
     print(f"      ✓ SVG written, {len(out_svg):,} chars\n")
 
     print("All 0.1.5 smoke tests passed.")

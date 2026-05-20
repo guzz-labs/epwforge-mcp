@@ -49,10 +49,10 @@ _SCENARIOS = [
         "dewpoint_F": 77.2,   "dewpoint_delta_F": 3.8,
     },
     {
-        "config": {"lat": 40.71, "lon": -74.01, "ssp": "ssp585", "year": 2090, "percentile": 90},
-        "cooling_db_F": 104.2, "cooling_db_delta_F": 16.8,
-        "heating_db_F": 28.2,  "heating_db_delta_F": 11.7,
-        "dewpoint_F": 90.5,    "dewpoint_delta_F": 17.1,
+        "config": {"lat": 40.71, "lon": -74.01, "ssp": "ssp370", "year": 2090, "percentile": 90},
+        "cooling_db_F": 101.6, "cooling_db_delta_F": 14.2,
+        "heating_db_F": 26.8,  "heating_db_delta_F": 10.3,
+        "dewpoint_F": 88.2,    "dewpoint_delta_F": 14.8,
     },
 ]
 
@@ -65,10 +65,10 @@ def test_compare_scenarios_svg_basic():
     # Baseline summary line includes all three values
     assert "87.4" in svg and "16.5" in svg and "73.4" in svg
     # Both scenario row labels include the SSP
-    assert "SSP245" in svg and "SSP585" in svg
+    assert "SSP245" in svg and "SSP370" in svg
     # Delta values appear with explicit + sign for positive
     assert "+4.0" in svg or "4.0" in svg
-    assert "+16.8" in svg
+    assert "+14.2" in svg
 
 
 def test_compare_scenarios_svg_no_undefined():

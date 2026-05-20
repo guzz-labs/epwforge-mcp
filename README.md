@@ -10,7 +10,7 @@ EPWForge generates and morphs weather files (`.epw`, `.ddy`) for building energy
 
 - **TMYx generation anywhere** — typical meteorological years synthesized from ERA5 reanalysis for any global lat/lon
 - **AMY (Actual Meteorological Year)** — historical hourly weather for hindcasting and calibration
-- **CMIP6 climate morphing** — apply future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0, SSP5-8.5) at 7 warming percentiles
+- **CMIP6 climate morphing** — apply future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0) at 7 warming percentiles. SSP5-8.5 was deprecated per CMIP7 (deemed implausible) — use SSP3-7.0 as the high-end scenario.
 - **Urban Heat Island adjustment** — Stewart & Oke LCZ presets (suburban / urban / dense_urban)
 - **Extreme event injection** — heat waves, cold snaps, humidity events, wind events, with auto-compound blending and per-event intensity (1-10 slider, AR6-auto-fill under SSP)
 - **Wildfire smoke overlays** — CAMS-derived AOD with Beer-Lambert solar attenuation, RH bump, temp shift
@@ -52,7 +52,7 @@ Most agents will use `find_station` to discover what's available, then either `g
 generate_weather_file(
     lat=40.71,
     lon=-74.01,
-    ssp="ssp585",      # SSP5-8.5 emissions
+    ssp="ssp370",      # SSP3-7.0 emissions (high-end scenario; SSP5-8.5 deprecated per CMIP7)
     year=2090,         # End-of-century
     percentile=90,     # 90th percentile warming
     uhi="urban",       # Stewart-Oke urban LCZ

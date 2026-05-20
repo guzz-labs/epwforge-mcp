@@ -24,7 +24,7 @@ CLI:
     epwforge-mcp --version        Print package version and exit
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 _HELP_TEXT = """\

@@ -82,7 +82,7 @@ async def main() -> None:
         # ── Step 4: compare_scenarios ──
         configs = [
             {"lat": 40.71, "lon": -74.01, "ssp": "ssp245", "year": 2050, "percentile": 50},
-            {"lat": 40.71, "lon": -74.01, "ssp": "ssp585", "year": 2090, "percentile": 90},
+            {"lat": 40.71, "lon": -74.01, "ssp": "ssp370", "year": 2090, "percentile": 90},
         ]
         print(f"[4/4] compare_scenarios(configs=<{len(configs)}>, baseline_url=<localhost EPW>) …")
         comp = await compare_scenarios(configs=configs, baseline_url=url)

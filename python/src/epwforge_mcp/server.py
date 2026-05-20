@@ -451,9 +451,13 @@ async def analyze_weather(
             )
         ),
     ] = None,
+    compact: Annotated[
+        bool,
+        Field(description="Token-saver. Returns a ~10-field headline-only response (~100 tokens) instead of the full ~800-token payload — drops monthly arrays, peak days, n_hours, weather_basis. Good for sanity checks, dashboards, batched chained calls. Set false (default) when you need the full payload. Routes through hosted MCP."),
+    ] = False,
     include_full_ashrae: Annotated[
         bool,
-        Field(description="Adds ASHRAE 0.4%/1%/2% cooling DB + 99.6%/99% heating DB design conditions. Routes through hosted MCP."),
+        Field(description="Adds ASHRAE 0.4%/1%/2% cooling DB + 99.6%/99% heating DB design conditions. Ignored when compact=true. Routes through hosted MCP."),
     ] = False,
     include_improbability: Annotated[
         bool,
@@ -721,15 +725,17 @@ async def analyze_weather(
             # Silent fallback: don't break the morphed response if baseline lookup fails.
             pass
 
-    # If any enrichment (or metric units) is requested, route through hosted
-    # MCP — it has the IDF emitter, full-ASHRAE computation, improbability
-    # scorer, and the unit-converted summarizer all in lib.
-    if include_full_ashrae or include_improbability or include_idf or units == "metric":
+    # If any enrichment (or metric units, or compact mode) is requested,
+    # route through hosted MCP — it has the IDF emitter, full-ASHRAE
+    # computation, improbability scorer, compact projection, and the
+    # unit-converted summarizer all in lib.
+    if include_full_ashrae or include_improbability or include_idf or units == "metric" or compact:
         payload: dict[str, Any] = {
             "include_full_ashrae": include_full_ashrae,
             "include_improbability": include_improbability,
             "include_idf": include_idf,
             "units": units,
+            "compact": compact,
         }
         if url: payload["url"] = url
         if urls: payload["urls"] = urls

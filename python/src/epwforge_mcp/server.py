@@ -301,7 +301,7 @@ async def find_station(
         Field(description="SSP scenario (only used with include_climate_deltas). ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
     ] = None,
     year: Annotated[
-        Literal[2030, 2050, 2070, 2090] | None,
+        Literal[2030, 2035, 2040, 2045, 2050, 2060, 2070, 2080, 2090, 2100] | None,
         Field(description="Future horizon (only used with include_climate_deltas)"),
     ] = None,
     percentile: Annotated[
@@ -428,7 +428,7 @@ async def analyze_weather(
                 "ssp370 is the credible upper bound (ssp585 was deprecated per "
                 "CMIP7 — deemed implausible — and is rejected). Default no SSP = "
                 "present-day TMY.\n"
-                "  • year: 2030|2050|2070|2090 — future horizon. Pair with ssp.\n"
+                "  • year: 2030|2035|2040|2045|2050|2060|2070|2080|2090|2100 — future horizon (5-yr through 2050, 10-yr after). Pair with ssp.\n"
                 "  • percentile: 5|10|25|50|75|90|95 — warming percentile across CMIP6 "
                 "models. **Use 75 for design-realistic warming; 50 is the median and "
                 "underestimates the tail for siting/sizing work.** Default 50.\n"
@@ -993,7 +993,7 @@ async def explore_design_conditions(
         Field(description="CMIP6 emission scenario. Pass None / omit for present-day TMY. ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
     ] = None,
     year: Annotated[
-        Literal[2030, 2050, 2070, 2090] | None,
+        Literal[2030, 2035, 2040, 2045, 2050, 2060, 2070, 2080, 2090, 2100] | None,
         Field(description="Future horizon. Pair with ssp."),
     ] = None,
     percentile: Annotated[
@@ -1084,7 +1084,7 @@ async def generate_weather_file(
         Field(description="CMIP6 emission scenario for future-climate morphing. ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
     ] = None,
     year: Annotated[
-        Literal[2030, 2050, 2070, 2090] | None,
+        Literal[2030, 2035, 2040, 2045, 2050, 2060, 2070, 2080, 2090, 2100] | None,
         Field(description="Future horizon. Required if ssp is set."),
     ] = None,
     percentile: Annotated[

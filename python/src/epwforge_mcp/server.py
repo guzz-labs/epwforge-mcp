@@ -850,12 +850,20 @@ async def chart_weather(
         ),
     ] = None,
     chart_type: Annotated[
-        Literal["diurnal", "temp_carpet", "wind_rose", "monthly_boxplot", "comparison"],
+        Literal[
+            "diurnal", "temp_carpet", "wind_rose", "monthly_boxplot",
+            "utci_carpet", "economizer_carpet", "pv_tilt_azimuth", "solar_under_events",
+            "comparison",
+        ],
         Field(description=(
             "Chart type. diurnal = monthly Max/Avg/Min hourly profile. "
             "temp_carpet = heatmap of hour x day-of-year. "
             "wind_rose = polar bars of direction x speed. "
             "monthly_boxplot = Q1/median/Q3 + whiskers per month. "
+            "utci_carpet = outdoor heat-stress hour×day, UTCI categories (Bröde 2012, shaded Tmrt). "
+            "economizer_carpet = air-side economizer free/integrated/locked-out hour×day under ASHRAE 90.1 high-limit. "
+            "pv_tilt_azimuth = annual PV generation across full tilt×azimuth grid, optimum marked. "
+            "solar_under_events = weekly GHI of modified scenario vs no-overlay reference, event-affected weeks banded. Requires config. "
             "comparison = design-condition delta bars (needs urls)."
         )),
     ] = "diurnal",
@@ -868,6 +876,29 @@ async def chart_weather(
             "instead of inline svg — keeps your context lean."
         )),
     ] = "preview",
+    econ_mode: Annotated[
+        Literal["drybulb", "enthalpy"],
+        Field(description=(
+            "economizer_carpet only. 'drybulb' (default) limits OA by Tdb; "
+            "'enthalpy' limits by moist-air enthalpy — more honest in humid climates."
+        )),
+    ] = "drybulb",
+    econ_high_limit_f: Annotated[
+        float | None,
+        Field(description="economizer_carpet only. ASHRAE 90.1 high-limit shutoff. Defaults: 75°F (drybulb) or 28 BTU/lb (enthalpy)."),
+    ] = None,
+    econ_supply_air_f: Annotated[
+        float | None,
+        Field(description="economizer_carpet only. Supply-air temperature setpoint (°F). Default 55."),
+    ] = None,
+    pv_tilt: Annotated[
+        float | None,
+        Field(description="pv_tilt_azimuth only. Optional — marks user's planned tilt (deg, 0=horizontal) alongside the optimum."),
+    ] = None,
+    pv_azimuth: Annotated[
+        float | None,
+        Field(description="pv_tilt_azimuth only. Optional — marks user's planned compass azimuth (deg, 0=N, 180=S) alongside the optimum."),
+    ] = None,
     save_to: Annotated[
         str | None,
         Field(description="When set, writes SVG to this path and returns the path (saves agent context)."),
@@ -899,8 +930,21 @@ async def chart_weather(
         raise ValueError("chart_weather requires exactly one of: url, urls, config")
     _assert_ssp_allowed(config)
 
-    # New chart types (added in 0.3.0) live only in the hosted MCP; route there.
-    if chart_type in ("temp_carpet", "wind_rose", "monthly_boxplot"):
+    # Charts that live only on the hosted MCP: routed there as-is. The
+    # 0.8.0 additions (utci_carpet, economizer_carpet, pv_tilt_azimuth,
+    # solar_under_events) all run on EPWForge infra — no client-side
+    # implementation. solar_under_events specifically requires config
+    # (server needs to run the pipeline twice — with and without overlays).
+    HOSTED_ONLY = ("temp_carpet", "wind_rose", "monthly_boxplot",
+                   "utci_carpet", "economizer_carpet", "pv_tilt_azimuth",
+                   "solar_under_events")
+    if chart_type in HOSTED_ONLY:
+        if chart_type == "solar_under_events" and not config:
+            raise ValueError(
+                "solar_under_events requires `config` — the chart needs both the "
+                "modified scenario and a no-overlay reference, which the server "
+                "synthesizes from the same config (overlays stripped for the reference)."
+            )
         payload: dict[str, Any] = {"chart_type": chart_type, "resolution": resolution}
         if url: payload["url"] = url
         if urls: payload["urls"] = urls
@@ -912,6 +956,14 @@ async def chart_weather(
                 cfg_with_base["base_url"] = base["base_url"]
                 cfg_with_base["base_url_label"] = base["base_url_label"]
             payload["config"] = cfg_with_base
+        # Pass-through chart-specific params (only included when set).
+        if chart_type == "economizer_carpet":
+            payload["econ_mode"] = econ_mode
+            if econ_high_limit_f is not None: payload["econ_high_limit_f"] = econ_high_limit_f
+            if econ_supply_air_f is not None: payload["econ_supply_air_f"] = econ_supply_air_f
+        if chart_type == "pv_tilt_azimuth":
+            if pv_tilt is not None: payload["pv_tilt"] = pv_tilt
+            if pv_azimuth is not None: payload["pv_azimuth"] = pv_azimuth
         result = await _call_hosted_mcp("chart_weather", payload)
         # Hosted MCP may have auto-uploaded large SVGs to Blob and replaced
         # the `svg` field with `svg_url`. Honor save_to for inline SVGs;
@@ -1453,6 +1505,50 @@ async def _call_hosted_mcp(tool_name: str, args: dict[str, Any]) -> dict[str, An
     except json.JSONDecodeError:
         # Hosted tool returned non-JSON text — pass it through as a message field.
         return {"message": text}
+
+
+# ============================================================================
+# Prompts — reusable templates surfaced in MCP clients (Claude Desktop's
+# "/" menu, ChatGPT's prompt picker, etc.). Cheap discoverability boost
+# for non-obvious batch / scenario patterns.
+# ============================================================================
+@mcp.prompt()
+def batch_scenarios_example(
+    lat: float = 40.7,
+    lon: float = -74.0,
+    location_label: str = "New York, NY",
+) -> str:
+    """Show me how to batch-generate multiple weather scenarios in one call.
+
+    Builds a ready-to-run generate_weather_file call covering the 4 most
+    useful axes of variation: today's TMY, two SSP futures, and the
+    historic AMY-hottest year. Demonstrates the `scenarios` array — one
+    call costs N credits (1 per scenario) and returns N EPWs in a single
+    response, vs N separate calls. Mirrors the platform's Batch Builder
+    in the Downloads tab.
+    """
+    return (
+        f"Use generate_weather_file with a `scenarios` array to produce a 4-file batch for "
+        f"{location_label} (lat={lat}, lon={lon}) in one call (4 credits total, vs 4 separate calls):\n\n"
+        f"```\n"
+        f"generate_weather_file(\n"
+        f"  lat={lat}, lon={lon},\n"
+        f"  scenarios=[\n"
+        f"    {{\"label\": \"today_tmy\"}},\n"
+        f"    {{\"label\": \"ssp245_2050\",       \"ssp\": \"ssp245\", \"year\": 2050, \"percentile\": 50}},\n"
+        f"    {{\"label\": \"ssp370_2070_p90\",   \"ssp\": \"ssp370\", \"year\": 2070, \"percentile\": 90}},\n"
+        f"    {{\"label\": \"amy_hottest_recent\", \"basis\": \"amy\", \"amy_year\": 2023}},\n"
+        f"  ],\n"
+        f"  include_ddy=true,\n"
+        f")\n"
+        f"```\n\n"
+        f"Notes:\n"
+        f"- Each scenario inherits lat/lon from the top level; per-scenario overrides win.\n"
+        f"- `label` is optional but lands in the response so you can correlate files.\n"
+        f"- All shared morphing/UHI/event params can live at the top level OR per-scenario.\n"
+        f"- Max 10 scenarios per batch. For larger batches, parallelize calls.\n"
+        f"- SSP5-8.5 is rejected (deprecated per CMIP7). Use ssp370 for high-end scenarios."
+    )
 
 
 # ============================================================================

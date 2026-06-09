@@ -622,18 +622,41 @@ async def analyze_weather(
             or not loc.get("state")
             or loc.get("country") in ("Unknown", "", None)
         )
-        if not is_generic:
-            return
-        loc["city"]    = nearest.get("city")    or nearest.get("name") or loc.get("city")    or "Unknown"
-        loc["state"]   = nearest.get("state")   or loc.get("state", "")
-        loc["country"] = nearest.get("country") or loc.get("country") or "Unknown"
+
+        # Elevation backfill is INDEPENDENT of the city/state generic check.
+        # The hosted morph pipeline can return a named station (e.g.
+        # "Beverly Rgnl AP") with elevation_ft=0, in which case is_generic
+        # is False and the pre-2026-06-09 `if not is_generic: return` skipped
+        # this fill entirely. Result: synthesized / morphed EPWs from elevated
+        # sites got sea-level air density and sea-level barometric pressure
+        # in their DesignDay objects. Always backfill elevation when missing
+        # or zero, regardless of city state. (QC review 2026-06-09 P0-1.)
+        elevation_changed = False
         if (not loc.get("elevation_ft") or loc.get("elevation_ft") == 0) and nearest.get("elevation_m") is not None:
             loc["elevation_ft"] = round(nearest["elevation_m"] * 3.28084)
+            elevation_changed = True
+
+        # Name backfill remains gated on is_generic.
+        name_changed = False
+        if is_generic:
+            loc["city"]    = nearest.get("city")    or nearest.get("name") or loc.get("city")    or "Unknown"
+            loc["state"]   = nearest.get("state")   or loc.get("state", "")
+            loc["country"] = nearest.get("country") or loc.get("country") or "Unknown"
+            name_changed = True
+
         result_obj["location"] = loc
-        dist = nearest.get("distance_km")
-        result_obj.setdefault("location_meta", {})["enriched_from"] = (
-            f"nearest station ({dist:.0f} km)" if isinstance(dist, (int, float)) else "nearest station"
-        )
+
+        # Annotate provenance only when we actually changed something.
+        if elevation_changed or name_changed:
+            dist = nearest.get("distance_km")
+            tags = []
+            if name_changed:      tags.append("city")
+            if elevation_changed: tags.append("elevation")
+            result_obj.setdefault("location_meta", {})["enriched_from"] = (
+                f"nearest station ({dist:.0f} km, fields: {'+'.join(tags)})"
+                if isinstance(dist, (int, float))
+                else f"nearest station (fields: {'+'.join(tags)})"
+            )
 
     async def _enrich_config_location(result_obj: Any, cfg: dict[str, Any] | None) -> None:
         """If a config-mode result has a generic Custom/Unknown location, fill it via nearest station."""

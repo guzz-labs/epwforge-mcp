@@ -154,6 +154,41 @@ def _base_url() -> str:
     return (os.environ.get("EPWFORGE_BASE_URL") or "https://epwforge.com").rstrip("/")
 
 
+def _compact_station(s: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a /api/stations entry to identifiers + single best file.
+
+    Picks the newest TMYx-vintage file (highest period end-year, source
+    preference for TMYx) and returns only that file's epw_url + ddy_url,
+    dropping the rest. Typical 6-10× token reduction per station.
+
+    Used by find_station when compact=True. (QC review 2026-06-09 P2-7.)
+    """
+    keep = {k: s[k] for k in (
+        "city", "state", "country", "lat", "lon", "distance_km", "wmo", "name",
+    ) if k in s}
+    files = s.get("files") or []
+    if files:
+        def _file_score(f: dict[str, Any]) -> tuple[int, int]:
+            source = (f.get("source") or "").upper()
+            period = f.get("period") or ""
+            # Prefer TMYx over TMY3 / CWEC / IWEC. Then newest end-year.
+            tmyx_pref = 1 if "TMYX" in source else 0
+            end_year = 0
+            if "-" in period:
+                try:
+                    end_year = int(period.split("-")[-1])
+                except ValueError:
+                    pass
+            return (tmyx_pref, end_year)
+        best = max(files, key=_file_score)
+        if best.get("epw_url"): keep["epw_url"] = best["epw_url"]
+        if best.get("ddy_url"): keep["ddy_url"] = best["ddy_url"]
+        if best.get("source"):  keep["best_file_source"] = best["source"]
+        if best.get("period"):  keep["best_file_period"] = best["period"]
+        keep["files_omitted"] = len(files) - 1
+    return keep
+
+
 # Default to the latest TMYx EPW from the nearest real OneBuilding station
 # when the caller passes a `config` (lat/lon). Synthesized custom-location
 # TMYx is reserved as a fallback for genuinely remote sites; the caller must
@@ -294,6 +329,17 @@ async def find_station(
         Literal[5, 10, 25, 50, 75, 90, 95],
         Field(description="Warming percentile (only used with include_climate_deltas, default 50)"),
     ] = 50,
+    compact: Annotated[
+        bool,
+        Field(description=(
+            "When True, return only the single newest TMYx file per station "
+            "(epw_url + ddy_url + source/period) plus identifiers. "
+            "Default False returns every vintage's full URL set. "
+            "Use compact=True in chained agent workflows — typical agents "
+            "only pick one file, and the full form can be 6-10× larger in "
+            "context. (Added 2026-06-09 per QC review P2-7.)"
+        )),
+    ] = False,
 ) -> dict[str, Any]:
     """Search the GuzzStations catalog (17,000+ weather stations worldwide).
 
@@ -337,6 +383,12 @@ async def find_station(
         data = resp.json()
 
     stations = data.get("stations", [])
+
+    # P2-7: compact each station to (identifiers + single best file) when
+    # the caller opted in. Picks the newest TMYx vintage and drops the rest.
+    if compact:
+        stations = [_compact_station(s) for s in stations]
+
     nearest_km = None
     if stations:
         try:
@@ -1293,8 +1345,15 @@ def _summarize_epw(epw: EPWFile, *, source_url: str) -> dict[str, Any]:
         "annual_mean_temp_F": round(sum(db_f) / len(db_f), 1),
         "cooling_design_db_F": round(c_to_f(percentile(db_c, 99.0)), 1),
         "heating_design_db_F": round(c_to_f(percentile(db_c, 1.0)), 1),
+        # peak_*_day = the date of the hottest / coldest 24-hour MEAN — not
+        # the date of the ASHRAE 99.6% / 0.4% design condition (those use
+        # the hourly percentile across the whole year and land on the
+        # 21st-of-month per the standard). Same source data, different
+        # definition; both are reported elsewhere. (QC review 2026-06-09 P2-8.)
         "peak_cooling_day": format_md(*peak_cooling_key),
+        "peak_cooling_day_basis": "hottest 24-hour mean (not ASHRAE 0.4% design)",
         "peak_heating_day": format_md(*peak_heating_key),
+        "peak_heating_day_basis": "coldest 24-hour mean (not ASHRAE 99.6% design)",
         "hdd_65_annual": round(hdd_65, 0),
         "cdd_65_annual": round(cdd_65, 0),
         "ghi_total_annual_kwh_per_m2": round(ghi_total_kwh, 0),

@@ -66,7 +66,6 @@ VALID_EVENTS = ("heatwave", "coldsnap", "hothumid", "coldwindy")
 # Code, Goose). Clients without MCP Apps support fall back to the plain-text
 # tool response — no regression.
 COMPARE_SITES_URI = "ui://epwforge/compare-sites-v2.html"
-DESIGN_EXPLORER_URI = "ui://epwforge/design-explorer-v1.html"
 
 _VIEWS_DIR = Path(__file__).parent / "views"
 
@@ -98,19 +97,6 @@ def compare_sites_view() -> str:
     return _read_view("compare-sites.html")
 
 
-@mcp.resource(
-    DESIGN_EXPLORER_URI,
-    name="Design conditions explorer (interactive)",
-    description=(
-        "Single-site live-tuning widget shown when explore_design_conditions "
-        "is called. Sliders for SSP / year / percentile / UHI re-call the tool "
-        "on change and re-render the diurnal chart + design-condition stats."
-    ),
-    mime_type="text/html;profile=mcp-app",
-    meta={"ui": {"csp": {"resourceDomains": ["https://unpkg.com"]}}},
-)
-def design_explorer_view() -> str:
-    return _read_view("design-explorer.html")
 
 
 # ── Catalog resources (mirror of hosted MCP route.ts) ───────────────────────
@@ -1027,96 +1013,6 @@ async def chart_weather(
         })
     svg = compare_scenarios_svg(baseline_dc, scenarios)
     return _chart_result(svg, "comparison", f"{len(urls)} URLs", save_to, extra={"n_scenarios": len(parsed)})
-
-
-# ============================================================================
-# Tool 4 (new in 0.5.1): explore_design_conditions — interactive single-site
-#                        widget for tuning SSP / year / percentile / UHI live
-# ============================================================================
-@mcp.tool(meta={
-    "ui": {"resourceUri": DESIGN_EXPLORER_URI},
-    "ui/resourceUri": DESIGN_EXPLORER_URI,  # legacy spec key
-})
-async def explore_design_conditions(
-    lat: Annotated[float, Field(ge=-90, le=90, description="Latitude, decimal degrees")],
-    lon: Annotated[float, Field(ge=-180, le=180, description="Longitude, decimal degrees")],
-    ssp: Annotated[
-        Literal["ssp126", "ssp245", "ssp370"] | None,
-        Field(description="CMIP6 emission scenario. Pass None / omit for present-day TMY. ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
-    ] = None,
-    year: Annotated[
-        Literal[2030, 2035, 2040, 2045, 2050, 2060, 2070, 2080, 2090, 2100] | None,
-        Field(description="Future horizon. Pair with ssp."),
-    ] = None,
-    percentile: Annotated[
-        int,
-        Field(ge=5, le=95, description="Warming percentile across CMIP6 models. Use 75 for design-realistic; 50 is median."),
-    ] = 75,
-    uhi: Annotated[
-        Literal["none", "suburban", "urban", "dense_urban"],
-        Field(description="Urban Heat Island preset."),
-    ] = "none",
-    allow_custom_location: Annotated[
-        bool,
-        Field(description=(
-            "Required when no OneBuilding station is within 50 km. By default this tool "
-            "uses the nearest real station's TMYx EPW as the morph base."
-        )),
-    ] = False,
-) -> dict[str, Any]:
-    """Interactive single-site design-conditions explorer.
-
-    Returns the full ASHRAE design conditions + a diurnal-profile SVG chart
-    for the requested scenario. In MCP Apps-capable hosts (Claude Desktop,
-    ChatGPT, VS Code, Goose), the response renders as a widget with sliders
-    for SSP / year / percentile / UHI; dragging a slider re-calls this tool
-    with the new value and re-renders the chart + stats live.
-
-    Use when the user wants to interactively tune a single site — much
-    better UX than asking them to retype config each time. For multi-site
-    comparison, use analyze_weather(urls=[...]) which renders cards.
-
-    Defaults: present-day TMY (no morph) — pass ssp+year for future scenarios.
-    P75 default percentile is design-realistic; P50 underestimates the tail.
-
-    No auth required.
-    """
-    # Build config — drop None values so analyze_weather sees a clean dict.
-    cfg: dict[str, Any] = {
-        "lat": lat,
-        "lon": lon,
-        "percentile": percentile,
-        "uhi": uhi,
-    }
-    if ssp:  cfg["ssp"] = ssp
-    if year: cfg["year"] = year
-
-    # Parallel: stats (with full ASHRAE) + diurnal chart. Each call goes
-    # through analyze_weather / chart_weather which apply the v0.5.0
-    # real-station base_url default for free.
-    stats_task = analyze_weather(
-        config=cfg,
-        include_full_ashrae=True,
-        allow_custom_location=allow_custom_location,
-    )
-    chart_task = chart_weather(
-        config=cfg,
-        chart_type="diurnal",
-        allow_custom_location=allow_custom_location,
-    )
-    stats, chart = await asyncio.gather(stats_task, chart_task)
-
-    return {
-        "analysis": stats,
-        "chart_svg": chart.get("svg") if isinstance(chart, dict) else None,
-        "control_state": {
-            "ssp": ssp,
-            "year": year,
-            "percentile": percentile,
-            "uhi": uhi,
-        },
-        "meta": _meta("explore_design_conditions"),
-    }
 
 
 # ============================================================================

@@ -2,7 +2,9 @@
 
 > MCP server for [EPWForge](https://epwforge.com) — give Claude, Cursor, and other AI agents the ability to generate, morph, and download weather files for building energy simulation.
 
-**Status:** 0.1.6 (Python). Ten tools — single + batch generation, station fetch, analysis, sensitivity sweep, SVG charts. Production backend, Pro-tier features wired in. Mirrored 1:1 by the hosted MCP at `https://epwforge.com/api/mcp` (so Claude Web users get the same surface).
+**Status:** 0.9.0 (Python). Four consolidated tools — `find_station`, `analyze_weather`, `chart_weather`, `generate_weather_file`. Production backend, Pro-tier features wired in. Mirrored 1:1 by the hosted MCP at `https://epwforge.com/api/mcp` (so Claude Web users get the same surface).
+
+> **Note (2026-06-09):** the tool surface was consolidated from ten tools to four in v0.2.0. Operations like batch generation, ensemble synthesis, and design-day generation are now *parameters* on the four core tools (e.g. `ensemble=...`, `scenarios=[...]`, `format="ddy"`). The full Tools section below still describes the older ten-tool surface and will be rewritten in a forthcoming release — for the actual current tool descriptions and arguments, see the tool docstrings in `python/src/epwforge_mcp/server.py` or call `tools/list` on the running server.
 
 ## What is EPWForge?
 

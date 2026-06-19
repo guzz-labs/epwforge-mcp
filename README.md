@@ -2,7 +2,7 @@
 
 > MCP server for [EPWForge](https://epwforge.com) — give Claude, Cursor, and other AI agents the ability to generate, morph, and download weather files for building energy simulation.
 
-**Status:** 0.9.2 (Python). Four consolidated tools — `find_station`, `analyze_weather`, `chart_weather`, `generate_weather_file`. Production backend, all tier features wired in. Mirrored 1:1 by the hosted MCP at `https://epwforge.com/api/mcp` (Claude Web / hosted MCP clients get the same surface).
+**Status:** 0.10.0 (Python). Four consolidated tools — `find_station`, `analyze_weather`, `chart_weather`, `generate_weather_file`. Production backend, all tier features wired in. Mirrored 1:1 by the hosted MCP at `https://epwforge.com/api/mcp` (Claude Web / hosted MCP clients get the same surface).
 
 ## What is EPWForge?
 
@@ -10,7 +10,7 @@ EPWForge generates and morphs weather files (`.epw`, `.ddy`, `.csv`) for buildin
 
 - **TMYx generation anywhere** — typical meteorological years synthesized from ERA5 reanalysis (1950–present) for any global lat/lon, or passthrough of published OneBuilding TMYx files for ~17,000 known stations.
 - **AMY (Actual Meteorological Year)** — historical hourly weather for any specific year since 1950. Useful for stress-testing against observed extremes.
-- **CMIP6 climate morphing** — apply SSP1-2.6 / SSP2-4.5 / SSP3-7.0 at horizons 2030–2100 across 7 warming percentiles. SSP5-8.5 deprecated per CMIP7 (use SSP3-7.0 as the high-end scenario). Belcher 2005 mean-shift hybridised with UKCP18 / NOAA Atlas 14 diurnal anomalies.
+- **CMIP6 climate morphing** — apply SSP1-2.6 / SSP2-4.5 / SSP3-7.0 at horizons 2030–2100 across 7 warming percentiles, plus SSP5-8.5 as an opt-in extreme stress test. SSP3-7.0 is the recommended high-end for design. Belcher 2005 mean-shift hybridised with UKCP18 / NOAA Atlas 14 diurnal anomalies.
 - **Urban Heat Island adjustment** — Stewart & Oke 2012 Local Climate Zone presets (suburban / urban / dense_urban).
 - **Extreme event injection** — heatwave, cold snap, hot-humid, cold-windy, wildfire smoke. Per-event intensity 1–10, AR6-auto-fill under an SSP. Events stitched at the baseline's hottest / coldest 14-day window.
 - **ASHRAE 169 design conditions** — full percentile bins (0.4 / 1 / 2 cooling, 99.6 / 99 heating, WB / DP / Enth variants), computed from the modified hourly distribution.

@@ -196,29 +196,14 @@ def _compact_station(s: dict[str, Any]) -> dict[str, Any]:
 STATION_DISTANCE_THRESHOLD_KM = 50.0
 
 
-# Belt-and-suspenders against ssp585 — the Literal enums already exclude it,
-# but the `config` and `scenarios` params on analyze_weather / chart_weather /
-# generate_weather_file are pass-through dicts where pydantic can't enforce
-# the enum. Reject early so the agent gets a clean deprecation message instead
-# of a confused 400 from the backend.
+# (Neutered 2026-06-18) This previously hard-rejected ssp585. SSP5-8.5 is now an
+# accepted opt-in EXTREME STRESS-TEST scenario, so there is nothing to reject. Kept
+# as a no-op so the existing call sites (analyze_weather / chart_weather /
+# generate_weather_file / batch) don't need touching; the Literal enums below now
+# include ssp585, and the hosted backend accepts it like any other SSP.
 def _assert_ssp_allowed(*args: Any) -> None:
-    """Walk dict-shaped tool args and reject any nested ssp == 'ssp585'.
-    Skips None and non-dict inputs so callers don't need to pre-filter."""
-    def _check(obj: Any, path: str) -> None:
-        if isinstance(obj, dict):
-            if obj.get("ssp") == "ssp585":
-                raise ValueError(
-                    f"ssp585 (SSP5-8.5) is deprecated per CMIP7 — the IPCC AR6 and the "
-                    f"upcoming CMIP7 generation deem its trajectory implausible. Found at "
-                    f"{path}.ssp. Retry with ssp='ssp370' (the recommended high-end scenario)."
-                )
-            for k, v in obj.items():
-                _check(v, f"{path}.{k}")
-        elif isinstance(obj, list):
-            for i, v in enumerate(obj):
-                _check(v, f"{path}[{i}]")
-    for i, a in enumerate(args):
-        _check(a, f"arg{i}")
+    """No-op. ssp585 is a valid stress-test scenario; retained for call-site compat."""
+    return None
 
 
 async def _resolve_base_url_for_config(
@@ -318,8 +303,8 @@ async def find_station(
         Field(description="When True with lat+lon+ssp+year, also returns the monthly CMIP6 delta-T. Routes through hosted MCP."),
     ] = False,
     ssp: Annotated[
-        Literal["ssp126", "ssp245", "ssp370"] | None,
-        Field(description="SSP scenario (only used with include_climate_deltas). ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
+        Literal["ssp126", "ssp245", "ssp370", "ssp585"] | None,
+        Field(description="SSP scenario (only used with include_climate_deltas). ssp370 is the recommended high-end for design; ssp585 (SSP5-8.5) is an opt-in extreme stress-test pathway for worst-case analysis."),
     ] = None,
     year: Annotated[
         Literal[2030, 2035, 2040, 2045, 2050, 2060, 2070, 2080, 2090, 2100] | None,
@@ -463,9 +448,9 @@ async def analyze_weather(
                 "Synthesize a SINGLE morphed EPW server-side and analyze it. Required: "
                 "`lat` (-90..90), `lon` (-180..180). Common params:\n"
                 "  • ssp: 'ssp126'|'ssp245'|'ssp370' — emission scenario. "
-                "ssp370 is the credible upper bound (ssp585 was deprecated per "
-                "CMIP7 — deemed implausible — and is rejected). Default no SSP = "
-                "present-day TMY.\n"
+                "ssp370 is the recommended high-end for design; 'ssp585' (SSP5-8.5) "
+                "is an opt-in extreme stress test (~4.4°C, low likelihood). Default "
+                "no SSP = present-day TMY.\n"
                 "  • year: 2030|2035|2040|2045|2050|2060|2070|2080|2090|2100 — future horizon (5-yr through 2050, 10-yr after). Pair with ssp.\n"
                 "  • percentile: 5|10|25|50|75|90|95 — warming percentile across CMIP6 "
                 "models. **Use 75 for design-realistic warming; 50 is the median and "
@@ -1103,8 +1088,8 @@ async def generate_weather_file(
     ] = "tmy",
     amy_year: Annotated[int | None, Field(description="Year for AMY basis. Only when basis='amy'.")] = None,
     ssp: Annotated[
-        Literal["ssp126", "ssp245", "ssp370"] | None,
-        Field(description="CMIP6 emission scenario for future-climate morphing. ssp585 was deprecated per CMIP7 (deemed implausible) — use ssp370 as the high-end scenario."),
+        Literal["ssp126", "ssp245", "ssp370", "ssp585"] | None,
+        Field(description="CMIP6 emission scenario for future-climate morphing. ssp370 is the recommended high-end; ssp585 (SSP5-8.5) is an opt-in extreme stress-test pathway for worst-case analysis."),
     ] = None,
     year: Annotated[
         Literal[2030, 2035, 2040, 2045, 2050, 2060, 2070, 2080, 2090, 2100] | None,
@@ -1525,7 +1510,7 @@ def batch_scenarios_example(
         f"- `label` is optional but lands in the response so you can correlate files.\n"
         f"- All shared morphing/UHI/event params can live at the top level OR per-scenario.\n"
         f"- Max 10 scenarios per batch. For larger batches, parallelize calls.\n"
-        f"- SSP5-8.5 is rejected (deprecated per CMIP7). Use ssp370 for high-end scenarios."
+        f"- ssp585 (SSP5-8.5) is an opt-in extreme stress test; ssp370 is the recommended high-end for design."
     )
 
 

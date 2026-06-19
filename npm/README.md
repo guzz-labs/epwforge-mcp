@@ -9,7 +9,7 @@
 EPWForge generates, morphs, and serves weather files (`.epw`, `.tmy`, `.amy`) for building energy simulation tools — EnergyPlus, OpenStudio, IES VE, eQUEST, and any workflow that consumes EPW. The platform supports:
 
 - **TMYx generation anywhere** — typical meteorological years synthesized from ERA5 reanalysis for any global lat/lon, not just airport stations
-- **Climate morphing** — apply CMIP6 future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0) to baseline weather files for resilience and adaptation studies. SSP5-8.5 was deprecated per CMIP7 (deemed implausible) — use SSP3-7.0 as the high-end scenario.
+- **Climate morphing** — apply CMIP6 future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0) to baseline weather files for resilience and adaptation studies, plus SSP5-8.5 as an opt-in extreme stress test. SSP3-7.0 is the recommended high-end for design.
 - **AMY (Actual Meteorological Year)** — historical hourly weather for hindcasting, calibration, and post-occupancy analysis
 - **Wildfire smoke overlays** — CAMS aerosol optical depth integrated into solar radiation channels
 - **Programmatic API + UI** — pull files via REST or browse the globe interface at [epwforge.com](https://epwforge.com)

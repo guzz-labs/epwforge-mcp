@@ -12,7 +12,7 @@ EPWForge generates and morphs weather files (`.epw`, `.ddy`) for building energy
 
 - **TMYx generation anywhere** — typical meteorological years synthesized from ERA5 reanalysis for any global lat/lon
 - **AMY (Actual Meteorological Year)** — historical hourly weather for hindcasting and calibration
-- **CMIP6 climate morphing** — apply future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0) at 7 warming percentiles. SSP5-8.5 was deprecated per CMIP7 (deemed implausible) — use SSP3-7.0 as the high-end scenario.
+- **CMIP6 climate morphing** — apply future-scenario deltas (SSP1-2.6, SSP2-4.5, SSP3-7.0) at 7 warming percentiles, plus SSP5-8.5 as an opt-in extreme stress test. SSP3-7.0 is the recommended high-end for design.
 - **Urban Heat Island adjustment** — Stewart & Oke LCZ presets (suburban / urban / dense_urban)
 - **Extreme event injection** — heat waves, cold snaps, humidity events, wind events, with auto-compound blending and per-event intensity (1-10 slider, AR6-auto-fill under SSP)
 - **Wildfire smoke overlays** — CAMS-derived AOD with Beer-Lambert solar attenuation
@@ -44,7 +44,7 @@ stats = await analyze_weather(url=epw_url)
 
 # 3. preview what a 2050 SSP3-7.0 + urban-UHI scenario looks like
 # (routes through hosted MCP — runs the pipeline, returns stats only)
-# SSP3-7.0 is the high-end scenario; SSP5-8.5 was deprecated per CMIP7.
+# SSP3-7.0 is the recommended high-end for design; SSP5-8.5 is an opt-in extreme stress test.
 future = await analyze_weather(config={
     "lat": 42.36, "lon": -71.06,
     "ssp": "ssp370", "year": 2050, "uhi": "urban",
